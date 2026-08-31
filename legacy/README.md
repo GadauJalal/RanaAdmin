@@ -32,7 +32,7 @@ Double-clicking `index.html` also works in most browsers, but the local server i
 - `app.js`: routing, views, forms, validation, state transitions, search, exports, and audit behavior
 - `assets/`: official Rana54 mark
 - `fonts/`: Jagerlay and Goli brand fonts
-- `CLAUDE_DESIGN_HANDOFF.md`: full specification of every view, button, and rule
+- `DESIGN_HANDOFF.md`: full specification of every view, button, and rule
 
 ## Included in this phase
 
