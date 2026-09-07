@@ -185,7 +185,9 @@ export const SEED: Snapshot = {
       status: "Awaiting site approval",
       scheduled: "Not scheduled",
       progress: 12,
-      blockers: ["Site request is awaiting approval"],
+      blockers: [
+        { reason: "site_request_awaiting_approval", note: "Site request is awaiting approval", blockedBy: null, blockedAt: "2026-08-26T09:00:00.000Z" }
+      ],
       checklist: ["Owner confirmed"],
       linkedDevice: null
     },
@@ -200,7 +202,9 @@ export const SEED: Snapshot = {
       status: "Blocked",
       scheduled: "27 Aug, 10:00",
       progress: 44,
-      blockers: ["Gateway serial conflicts with an existing identity"],
+      blockers: [
+        { reason: "duplicate_gateway_identity", note: "Gateway serial conflicts with an existing identity", blockedBy: null, blockedAt: "2026-08-27T10:00:00.000Z" }
+      ],
       checklist: ["Owner confirmed", "Gateway scanned"],
       linkedDevice: null
     },

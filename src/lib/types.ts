@@ -61,6 +61,18 @@ export type JobStatus =
   | "Ready for acceptance"
   | "Completed";
 
+/**
+ * One reason a job is (or was) blocked. The backend changed this from a bare
+ * string to an object on every job-returning endpoint; `blockedBy` is nullable
+ * because historical rows predating the change have no recorded actor.
+ */
+export interface JobBlocker {
+  reason: string;
+  note: string | null;
+  blockedBy: string | null;
+  blockedAt: string;
+}
+
 export interface Job {
   id: string;
   enterpriseId: string;
@@ -72,7 +84,7 @@ export interface Job {
   status: JobStatus | string;
   scheduled: string;
   progress: number;
-  blockers: string[];
+  blockers: JobBlocker[];
   checklist: string[];
   linkedDevice: string | null;
 }
