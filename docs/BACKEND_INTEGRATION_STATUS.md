@@ -51,6 +51,28 @@ expects.
    changed entity only; this app currently expects `{ snapshot, data }` on
    success and `{ code, message, snapshot? }` on failure.
 
+## The 2026-09-06 installer-app rounds do not unblock this console
+
+The installer-app handover (rounds 1 to 3) adds installer-facing endpoints only,
+so it does not remove either blocker above:
+
+- `GET /jobs/me` is the *caller's own* assigned jobs (assignee-scoped), not a
+  staff list of all jobs across enterprises. The staff console still has no way
+  to enumerate jobs it did not create.
+- `POST /jobs/:jobId/evidence`, `POST /jobs/:jobId/block`, and the newly
+  installer-callable `POST /jobs/:jobId/gateway-link` are gated on installer
+  permissions (`job:evidence`, `job:block`, `job:update`). Staff actions
+  (`checklist`, `unblock`, `reassign`, `acceptance`) still require `JobWrite`
+  and still take ids only a list could provide.
+
+One breaking change from that round is reflected in this app already: `blockers`
+on every job-returning endpoint changed from `string[]` to an array of
+`{ reason, note, blockedBy, blockedAt }`. The app's `Job` type, seed, mock
+adapter and job drawer have been updated to that shape so nothing breaks when a
+backend arrives. The staff `POST /jobs/:jobId/checklist` now also returns 409 on
+a duplicate item rather than silently adding a row; the mock does not yet model
+that (harmless, since the console cannot reach the backend).
+
 ## Mutations that are already documented and ready to map
 
 These backend routes exist and are described in the site-requests / jobs /

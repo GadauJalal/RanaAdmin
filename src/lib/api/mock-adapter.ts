@@ -18,7 +18,7 @@
 
 import { clockTime, maskEmail, operationalTimestamp, pastTense } from "@/lib/format";
 import { SEED } from "@/lib/seed";
-import { SNAPSHOT_COLLECTIONS, type Device, type Snapshot } from "@/lib/types";
+import { SNAPSHOT_COLLECTIONS, type Device, type JobBlocker, type Snapshot } from "@/lib/types";
 
 import {
   failure,
@@ -48,6 +48,11 @@ const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 /** The operator this workspace session acts as. A backend derives it from the session. */
 const ACTOR = "Platform operations";
+
+/** Build a blocker entry in the object shape every job-returning endpoint uses. */
+function blocker(reason: string, note: string | null = null): JobBlocker {
+  return { reason, note, blockedBy: ACTOR, blockedAt: new Date().toISOString() };
+}
 
 let memory: Snapshot | null = null;
 
@@ -211,7 +216,7 @@ export const mockAdapter: OperationsApi = {
           job.blockers = [];
         } else {
           job.status = "Blocked";
-          job.blockers = [`Site request returned: ${input.reason.trim()}`];
+          job.blockers = [blocker("site_request_returned", input.reason.trim())];
         }
       });
 
@@ -258,7 +263,7 @@ export const mockAdapter: OperationsApi = {
       status: "Scheduled",
       scheduled: `${input.date} ${input.time}`,
       progress: 8,
-      blockers: [] as string[],
+      blockers: [] as JobBlocker[],
       checklist: [
         "Approved site request received",
         `Operations note: ${input.note.trim()}`
@@ -319,7 +324,7 @@ export const mockAdapter: OperationsApi = {
     // platform recorded real work.
     if (duplicate) {
       job.status = "Blocked";
-      job.blockers = [`Gateway serial already belongs to ${duplicate.id}`];
+      job.blockers = [blocker("duplicate_gateway_identity", `Gateway serial already belongs to ${duplicate.id}`)];
       const incidentId = `INC-P2-${suffix()}`;
       snapshot.incidents.unshift({
         id: incidentId,

@@ -288,7 +288,7 @@ export function JobDrawer({ id }: { id: string }) {
       />
       {job.blockers.length ? (
         <Notice icon="incident" tone="danger">
-          {job.blockers.join(" ")}
+          {job.blockers.map((blocker) => blocker.reason + (blocker.note ? ` (${blocker.note})` : "")).join(" · ")}
         </Notice>
       ) : (
         <Notice icon="shield">
