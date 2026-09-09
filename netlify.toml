@@ -1,0 +1,17 @@
+# Netlify configuration for the Rana54 Network Operations (Next.js) app.
+#
+# Demo (default): with no environment variables set, the app runs on its
+# bundled prototype data (NEXT_PUBLIC_DATA_SOURCE defaults to "mock"), so it is
+# fully viewable with no backend. This is the intended mode until the backend
+# exposes the staff list/snapshot endpoints this console needs (see
+# docs/BACKEND_INTEGRATION_STATUS.md).
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
