@@ -1,21 +1,29 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 /**
- * Server-side proxy to the Rana54 operations service.
+ * Server-side proxy to the Rana54 backend.
  *
  * With NEXT_PUBLIC_API_BASE_URL=/api the browser talks only to this Next.js
- * server, which forwards to OPERATIONS_API_URL. That keeps the service token
- * off the client and gives the workspace one origin, so no CORS configuration
- * is needed on the backend.
+ * server, which forwards every /api/<path> request verbatim to the backend at
+ * <RANA_API_URL>/<path>. That gives the workspace one origin, so no CORS
+ * configuration is needed on the backend.
  *
- * If the browser should reach the service directly instead, point
- * NEXT_PUBLIC_API_BASE_URL at the service and these handlers go unused.
+ * Authentication is the operator's own session: the browser attaches the
+ * Bearer access token it received from POST /auth/login, and this proxy
+ * forwards that header unchanged. There is no shared service token.
+ *
+ * The backend mounts routes at the bare root (no /api prefix) and answers
+ * every error as { statusCode, code, message }, which is passed through.
  */
 
 export const dynamic = "force-dynamic";
 
-const UPSTREAM = process.env.OPERATIONS_API_URL;
-const TOKEN = process.env.OPERATIONS_API_TOKEN;
+/**
+ * RANA_API_URL is the runtime (server-only) setting. NEXT_PUBLIC_RANA_API_URL
+ * is an equivalent that Next.js inlines at build time, which lets a Netlify
+ * branch context switch a deploy to live with no dashboard configuration.
+ */
+const UPSTREAM = (process.env.RANA_API_URL || process.env.NEXT_PUBLIC_RANA_API_URL || "").trim();
 
 /** Response headers that belong to the proxied hop, not the payload. */
 const HOP_BY_HOP = new Set([
@@ -31,29 +39,26 @@ async function proxy(request: NextRequest, path: string[]) {
   if (!UPSTREAM) {
     return NextResponse.json(
       {
+        statusCode: 503,
         code: "server_error",
         message:
-          "OPERATIONS_API_URL is not configured. Set it, or run with NEXT_PUBLIC_DATA_SOURCE=mock."
+          "RANA_API_URL is not configured. Set it, or run with NEXT_PUBLIC_DATA_SOURCE=mock."
       },
       { status: 503 }
     );
   }
 
-  const target = new URL(
-    path.map(encodeURIComponent).join("/"),
-    UPSTREAM.endsWith("/") ? UPSTREAM : `${UPSTREAM}/`
-  );
+  const base = UPSTREAM.endsWith("/") ? UPSTREAM : `${UPSTREAM}/`;
+  const target = new URL(path.map(encodeURIComponent).join("/"), base);
   target.search = request.nextUrl.search;
 
   const headers = new Headers();
-  headers.set("Accept", "application/json");
+  headers.set("Accept", request.headers.get("accept") ?? "application/json");
   const contentType = request.headers.get("content-type");
   if (contentType) headers.set("Content-Type", contentType);
-  // The operator's session travels with the request; the service token
-  // identifies this workspace to the backend.
-  const cookie = request.headers.get("cookie");
-  if (cookie) headers.set("Cookie", cookie);
-  if (TOKEN) headers.set("Authorization", `Bearer ${TOKEN}`);
+  // The operator's session travels with the request as a Bearer token.
+  const authorization = request.headers.get("authorization");
+  if (authorization) headers.set("Authorization", authorization);
 
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
 
@@ -77,11 +82,12 @@ async function proxy(request: NextRequest, path: string[]) {
       headers: responseHeaders
     });
   } catch (error) {
-    console.error("Operations API proxy failed", error);
+    console.error("Rana54 API proxy failed", error);
     return NextResponse.json(
       {
+        statusCode: 502,
         code: "network_error",
-        message: "The operations service could not be reached. No change was recorded."
+        message: "The Rana54 backend could not be reached. No change was recorded."
       },
       { status: 502 }
     );

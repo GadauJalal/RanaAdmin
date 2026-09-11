@@ -1,0 +1,33 @@
+# Netlify configuration for the Rana54 Network Operations (Next.js) app.
+#
+# Two deploy contexts:
+#
+#   PRODUCTION (main) = DEMO. NEXT_PUBLIC_DATA_SOURCE defaults to "mock", so the
+#   console runs on its bundled prototype data and is fully viewable with no
+#   backend.
+#
+#   BRANCH "rana54-integration" = LIVE TEST ENVIRONMENT. Deploys of this branch
+#   point at the staging backend and require a real platform-administrator
+#   sign-in. The backed operations (create enterprise and provision its first
+#   administrator, platform users, installers, act-by-id job flows) run for
+#   real; areas with no backend list endpoint yet stay empty. See
+#   docs/BACKEND_INTEGRATION_STATUS.md.
+#
+# The browser only ever talks to this app's own /api proxy (same origin), so no
+# CORS configuration is needed on the backend for this app.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# Live test environment. Applies only to deploys of this branch. Next.js inlines
+# NEXT_PUBLIC_* at build time, so no dashboard configuration is required.
+[context.rana54-integration.environment]
+  NEXT_PUBLIC_DATA_SOURCE = "http"
+  NEXT_PUBLIC_RANA_API_URL = "https://staging.api.rana54.com"

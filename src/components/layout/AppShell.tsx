@@ -2,8 +2,10 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, type ReactNode } from "react";
+
+import { clearSession, hasSession } from "@/lib/api/session";
 
 import { GlobalSearch } from "@/components/layout/GlobalSearch";
 import { OverlayHost } from "@/components/layout/OverlayHost";
@@ -85,6 +87,25 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { snapshot, loading, loadError, reload, openOverlay, navOpen, setNavOpen } =
     useWorkspace();
   const pathname = usePathname();
+  const router = useRouter();
+
+  /* Live mode requires a signed-in operator; demo mode has no sign-in. */
+  const live = !IS_PROTOTYPE_DATA;
+  const signedIn = !live || hasSession();
+  useEffect(() => {
+    if (!signedIn) router.replace("/login");
+  }, [signedIn, router]);
+
+  function signOut() {
+    const base = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api").replace(/\/$/, "");
+    void fetch(`${base}/auth/logout`, { method: "POST" }).catch(() => undefined);
+    clearSession();
+    router.replace("/login");
+  }
+
+  if (!signedIn) {
+    return <div className="boot-screen" role="status" aria-hidden="true" />;
+  }
 
   if (loading) {
     return (
@@ -148,6 +169,11 @@ export function AppShell({ children }: { children: ReactNode }) {
             })}
           </nav>
           <div className="sidebar-spacer" />
+          {live ? (
+            <button type="button" className="btn btn-secondary sign-out" onClick={signOut}>
+              Sign out
+            </button>
+          ) : null}
           <div className="side-safety">
             <strong>
               <Icon name="shield" /> Privileged workspace
