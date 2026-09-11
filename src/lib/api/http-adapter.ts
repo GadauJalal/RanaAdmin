@@ -278,6 +278,26 @@ function rememberEnterprise(enterprise: Enterprise) {
   storeEnterprises([enterprise, ...rest]);
 }
 
+/**
+ * Read a list out of a response whether the backend sends a bare array or a
+ * paginated envelope such as { installers: [...], total } or { items: [...] }.
+ * A shape we do not recognise yields an empty list rather than a crash, so one
+ * collection can never take the whole snapshot down.
+ */
+function asList<T>(outcome: RequestOutcome<unknown>, ...keys: string[]): T[] {
+  if (!outcome.ok) return [];
+  const body = outcome.body;
+  if (Array.isArray(body)) return body as T[];
+  if (body && typeof body === "object") {
+    for (const key of [...keys, "items", "data", "results", "rows"]) {
+      const value = (body as Record<string, unknown>)[key];
+      if (Array.isArray(value)) return value as T[];
+    }
+    console.warn("Unrecognised list shape from the backend", Object.keys(body as object));
+  }
+  return [];
+}
+
 /* -------------------------------------------------------------------------- */
 /* Mappers                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -433,11 +453,11 @@ async function buildSnapshot(): Promise<Snapshot> {
     currentOperator,
     enterprises,
     siteRequests: [],
-    installers: installers.ok ? installers.body.map(mapInstaller) : [],
+    installers: asList<BackendInstaller>(installers, "installers").map(mapInstaller),
     jobs: [],
     devices: [],
     incidents: [],
-    staff: users.ok ? users.body.map(mapStaff) : [],
+    staff: asList<BackendAdminUser>(users, "users").map(mapStaff),
     supportGrants: [],
     services: mapHealth(health.ok ? health.body : null),
     audit: []
