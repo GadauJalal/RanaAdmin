@@ -34,13 +34,16 @@ export function NewEnterpriseModal() {
               status: text(data, "status"),
               adminName: text(data, "adminName"),
               adminEmail: text(data, "adminEmail"),
-              products: data.getAll("product").map(String)
+              products: data.getAll("product").map(String),
+              phone: text(data, "phone")
             }),
           {
             failureTitle: "Enterprise could not be created",
             success: ({ enterprise }) => ({
               title: "Enterprise created",
-              detail: `${enterprise.name} is ready for onboarding and the first administrator invitation was issued.`
+              detail: enterprise.adminTempPassword
+                ? `${enterprise.name} is ready. The administrator's one-time temporary password is shown in the enterprise record; copy it now, it is not shown again.`
+                : `${enterprise.name} is ready for onboarding and the first administrator invitation was issued.`
             }),
             onSuccess: ({ enterprise }) => openOverlay({ kind: "enterprise", id: enterprise.id })
           }
@@ -83,6 +86,16 @@ export function NewEnterpriseModal() {
           placeholder="name@company.com"
         />
         <small>The stored presentation is masked after invitation.</small>
+      </div>
+      <div className="field">
+        <label htmlFor="enterprise-phone">Contact phone</label>
+        <input
+          id="enterprise-phone"
+          name="phone"
+          type="tel"
+          placeholder="+234 800 000 0000"
+        />
+        <small>Recorded on the organisation. Required by the live backend.</small>
       </div>
       <div className="field full">
         <span className="field-label">Enabled products</span>
@@ -716,9 +729,11 @@ export function InviteStaffModal() {
             failureTitle: "Invitation could not be sent",
             success: ({ staff }) => ({
               title: "Staff invitation sent",
-              detail: staff.privileged
-                ? "The account was invited. Privileged access still requires a separate access review."
-                : "The role and scope were recorded with the invitation."
+              detail: staff.tempPassword
+                ? `Provisioned. One-time temporary password for ${staff.email}: ${staff.tempPassword} (copy it now, it is not shown again).`
+                : staff.privileged
+                  ? "The account was invited. Privileged access still requires a separate access review."
+                  : "The role and scope were recorded with the invitation."
             }),
             onSuccess: () => router.push("/access?tab=staff")
           }

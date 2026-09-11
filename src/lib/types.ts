@@ -24,6 +24,14 @@ export interface Enterprise {
   sites: number;
   liveSites: number;
   lastActivity: string;
+  /** Live backend only: the provisioned first administrator's user id. */
+  adminUserId?: string;
+  /**
+   * Live backend only: the one-time temporary password issued when the first
+   * administrator was provisioned. Held in memory for this session only and
+   * never persisted, matching the backend (it is shown exactly once).
+   */
+  adminTempPassword?: string;
 }
 
 export type SiteRequestStatus = "Pending review" | "Approved" | "Returned";
@@ -133,6 +141,8 @@ export interface StaffMember {
   status: StaffStatus | string;
   lastAccess: string;
   privileged: boolean;
+  /** Live backend only: one-time temporary password from provisioning (memory only). */
+  tempPassword?: string;
 }
 
 export type SupportGrantStatus = "Active" | "Expired" | "Revoked";

@@ -607,3 +607,21 @@ tbody tr:hover { background: rgba(237, 242, 238, .55); }
 /* Overlay host is a plain wrapper; its children position themselves. */
 #overlay:empty { display: none; }
 
+
+/* ---------------------------------------------------------------------------
+   Live mode: operator sign-in and one-time credentials
+--------------------------------------------------------------------------- */
+.login-card { width: min(420px, 100%); display: grid; gap: 14px; padding: 28px; border-radius: 16px; background: #fff; color: #13211a; box-shadow: 0 12px 40px rgba(19, 33, 26, .18); }
+.login-card .brand-word { font-size: 22px; font-weight: 800; }
+.login-card h1 { margin: 4px 0 0; font-size: 17px; }
+.login-card p { margin: 0; font-size: 12px; color: #5c6b62; }
+.login-card .field { display: grid; gap: 6px; }
+.login-card .field label { font-size: 11px; font-weight: 600; color: #5c6b62; }
+.login-card .field input { padding: 10px 12px; border: 1px solid #c9d3cc; border-radius: 10px; font: inherit; }
+.login-card .btn { margin-top: 4px; }
+.login-error { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px; background: #f8e1db; color: #c7442c; font-size: 12px; }
+.sign-out { margin: 0 16px 12px; }
+.temp-password { display: grid; gap: 6px; margin-top: 12px; padding: 12px 14px; border-radius: 12px; background: #fef6e8; color: #8a6110; }
+.temp-password strong { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.temp-password code { font-size: 15px; font-weight: 700; letter-spacing: .04em; color: #13211a; user-select: all; }
+.temp-password small { font-size: 11px; line-height: 1.5; }

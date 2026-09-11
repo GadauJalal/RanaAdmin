@@ -63,6 +63,8 @@ export interface CreateEnterpriseInput {
   adminName: string;
   adminEmail: string;
   products: string[];
+  /** Contact phone for the organisation record (the backend requires one). */
+  phone?: string;
 }
 
 export interface EnterpriseTransitionInput {

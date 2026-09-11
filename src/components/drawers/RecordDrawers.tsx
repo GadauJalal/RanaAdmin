@@ -114,6 +114,17 @@ export function EnterpriseDrawer({ id }: { id: string }) {
           meta={enterprise.adminEmail || "No invitation issued"}
           trailing={<Chip>{enterprise.adminName ? "Invited" : "Missing"}</Chip>}
         />
+        {enterprise.adminTempPassword ? (
+          <div className="temp-password" role="note">
+            <strong>One-time temporary password</strong>
+            <code>{enterprise.adminTempPassword}</code>
+            <small>
+              Give this to {enterprise.adminName || "the administrator"} for their first sign-in
+              (they set a real password on the Organization Admin activate screen). It is shown
+              only once and is not stored.
+            </small>
+          </div>
+        ) : null}
       </DetailSection>
 
       <DetailSection title="Enabled products">
