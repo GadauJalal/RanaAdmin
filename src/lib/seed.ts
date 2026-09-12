@@ -65,6 +65,44 @@ export const SEED: Snapshot = {
       lastActivity: "34 min ago"
     }
   ],
+  sites: [
+    {
+      id: "SITE-SHL-0472",
+      name: "Ikeja Production Hub",
+      enterpriseId: "ENT-SHL-0018",
+      enterprise: "Sahel Foods Ltd.",
+      region: "South West",
+      status: "Active",
+      created: "14 Jul 09:20"
+    },
+    {
+      id: "SITE-SHL-0611",
+      name: "Kano Cold Store",
+      enterpriseId: "ENT-SHL-0018",
+      enterprise: "Sahel Foods Ltd.",
+      region: "North West",
+      status: "Provisioned",
+      created: "25 Aug 11:06"
+    },
+    {
+      id: "SITE-KVL-0288",
+      name: "Nairobi Fleet Depot",
+      enterpriseId: "ENT-KVL-0062",
+      enterprise: "Kavala Logistics",
+      region: "Unassigned",
+      status: "Active",
+      created: "22 Aug 14:21"
+    },
+    {
+      id: "SITE-ARD-0104",
+      name: "Apapa Warehouse",
+      enterpriseId: "ENT-ARD-0074",
+      enterprise: "Ardent Manufacturing",
+      region: "South West",
+      status: "Provisioned",
+      created: "26 Aug 08:47"
+    }
+  ],
   siteRequests: [
     {
       id: "REQ-SITE-1028",

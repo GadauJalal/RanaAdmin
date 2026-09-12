@@ -25,6 +25,12 @@ export function DevicesView() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("All");
 
+  // The live backend reports certification states rather than the prototype's
+  // freshness states, so the filter offers whichever statuses are present.
+  const statusFilters = Array.from(
+    new Set([...STATUS_FILTERS, ...snapshot.devices.map(item => String(item.status))])
+  );
+
   const needle = query.trim().toLowerCase();
   const devices = snapshot.devices.filter(item => {
     const matchesQuery =
@@ -128,7 +134,7 @@ export function DevicesView() {
           onChange={event => setStatus(event.target.value)}
         >
           <option>All</option>
-          {STATUS_FILTERS.map(value => (
+          {statusFilters.map(value => (
             <option key={value}>{value}</option>
           ))}
         </select>

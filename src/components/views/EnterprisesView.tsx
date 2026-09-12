@@ -63,6 +63,13 @@ export function EnterprisesView() {
             </button>
             <button
               type="button"
+              className="btn btn-secondary"
+              onClick={() => openOverlay({ kind: "new-site" })}
+            >
+              <Icon name="plus" /> Provision site
+            </button>
+            <button
+              type="button"
               className="btn btn-primary"
               onClick={() => openOverlay({ kind: "new-enterprise" })}
             >

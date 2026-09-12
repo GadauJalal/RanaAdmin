@@ -20,6 +20,7 @@ import {
   NewEnterpriseModal,
   NewIncidentModal,
   NewJobModal,
+  NewSiteModal,
   ReassignJobModal,
   ReissueAdminModal,
   SiteDecisionModal,
@@ -48,6 +49,8 @@ function renderOverlay(overlay: Overlay) {
       return <NotificationsDrawer />;
     case "new-enterprise":
       return <NewEnterpriseModal />;
+    case "new-site":
+      return <NewSiteModal enterpriseId={overlay.enterpriseId} />;
     case "new-job":
       return <NewJobModal />;
     case "new-incident":

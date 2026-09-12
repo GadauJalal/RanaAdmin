@@ -34,6 +34,19 @@ export interface Enterprise {
   adminTempPassword?: string;
 }
 
+export type PlatformSiteStatus = "Provisioned" | "Active" | "Decommissioned";
+
+/** A governed site identity, across every tenant. */
+export interface PlatformSite {
+  id: string;
+  name: string;
+  enterpriseId: string;
+  enterprise: string;
+  region: string;
+  status: PlatformSiteStatus | string;
+  created: string;
+}
+
 export type SiteRequestStatus = "Pending review" | "Approved" | "Returned";
 
 export interface SiteRequest {
@@ -190,6 +203,7 @@ export interface Operator {
 export interface Snapshot {
   currentOperator: Operator;
   enterprises: Enterprise[];
+  sites: PlatformSite[];
   siteRequests: SiteRequest[];
   installers: Installer[];
   jobs: Job[];
@@ -203,6 +217,7 @@ export interface Snapshot {
 
 export const SNAPSHOT_COLLECTIONS = [
   "enterprises",
+  "sites",
   "siteRequests",
   "installers",
   "jobs",

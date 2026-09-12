@@ -190,6 +190,81 @@ export function ReissueAdminModal({ id }: { id: string }) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Sites                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Provision a site directly for an enterprise. This is the Rana54-side path
+ * when no site request was submitted; the organisation's own request goes
+ * through the site request decision instead.
+ */
+export function NewSiteModal({ enterpriseId }: { enterpriseId?: string }) {
+  const snapshot = useSnapshot();
+  const { run, openOverlay } = useWorkspace();
+  const enterprises = snapshot.enterprises.filter(item => item.status !== "Suspended");
+
+  return (
+    <FormModal
+      title="Provision site"
+      description="Create a governed site identity for an enterprise. Gateway linking still requires an installation job."
+      formId="site-form"
+      submitLabel="Provision site"
+      submitIcon="plus"
+      onSubmit={data =>
+        void run(
+          () =>
+            api.createSite({
+              enterpriseId: text(data, "enterpriseId"),
+              name: text(data, "name"),
+              address: text(data, "address")
+            }),
+          {
+            failureTitle: "Site could not be provisioned",
+            success: ({ site }) => ({
+              title: "Site provisioned",
+              detail: `${site.name} (${site.id}) is provisioned for ${site.enterprise}. It goes live once an installation is accepted.`
+            }),
+            onSuccess: ({ site }) => openOverlay({ kind: "enterprise", id: site.enterpriseId })
+          }
+        )
+      }
+    >
+      <div className="field full">
+        <label htmlFor="site-enterprise">Enterprise</label>
+        <select id="site-enterprise" name="enterpriseId" required defaultValue={enterpriseId ?? ""}>
+          <option value="">Select enterprise</option>
+          {enterprises.map(item => (
+            <option key={item.id} value={item.id}>
+              {item.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="field full">
+        <label htmlFor="site-name">Site name</label>
+        <input id="site-name" name="name" required maxLength={300} placeholder="Lekki Distribution Hub" />
+      </div>
+      <div className="field full">
+        <label htmlFor="site-address">Address</label>
+        <input
+          id="site-address"
+          name="address"
+          required
+          maxLength={500}
+          placeholder="12 Admiralty Way, Lekki Phase 1, Lagos"
+        />
+      </div>
+      <div className="field full">
+        <Notice icon="shield">
+          The site starts as provisioned. Readings arrive only after a gateway is linked inside an
+          installation job and the installation is accepted.
+        </Notice>
+      </div>
+    </FormModal>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Site requests                                                               */
 /* -------------------------------------------------------------------------- */
 
