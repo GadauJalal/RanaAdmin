@@ -27,6 +27,7 @@ import {
   type CreateEnterpriseInput,
   type CreateIncidentInput,
   type CreateJobInput,
+  type CreateSiteInput,
   type CreateSupportGrantInput,
   type EnterpriseTransitionInput,
   type ExportKind,
@@ -221,6 +222,16 @@ export const mockAdapter: OperationsApi = {
         enterprise.sites += 1;
         enterprise.readiness = Math.min(100, enterprise.readiness + 5);
       }
+      // Approval is what creates the governed site identity.
+      snapshot.sites.unshift({
+        id: `SITE-NEW-${suffix()}`,
+        name: request.siteName,
+        enterpriseId: request.enterpriseId,
+        enterprise: request.enterprise,
+        region: request.location,
+        status: "Provisioned",
+        created: operationalTimestamp()
+      });
     }
 
     audit(
@@ -231,6 +242,29 @@ export const mockAdapter: OperationsApi = {
       input.reason.trim()
     );
     return ok(snapshot, undefined);
+  },
+
+  async createSite(input: CreateSiteInput) {
+    const snapshot = draft();
+    const enterprise = snapshot.enterprises.find(item => item.id === input.enterpriseId);
+    if (!enterprise) return failure("not_found", "That enterprise account no longer exists.");
+    if (!input.name.trim()) return failure("invalid_input", "A site name is required.");
+
+    const site = {
+      id: `SITE-NEW-${suffix()}`,
+      name: input.name.trim(),
+      enterpriseId: enterprise.id,
+      enterprise: enterprise.name,
+      region: input.address.trim() || "Unassigned",
+      status: "Provisioned",
+      created: operationalTimestamp()
+    };
+    snapshot.sites.unshift(site);
+    enterprise.sites += 1;
+    enterprise.lastActivity = "Just now";
+
+    audit(snapshot, "Site provisioned", site.id, "Provisioned", `${site.name} for ${enterprise.name}`);
+    return ok(snapshot, { site });
   },
 
   async createJob(input: CreateJobInput) {

@@ -32,6 +32,7 @@ export type Overlay =
   | { kind: "staff"; id: string }
   | { kind: "notifications" }
   | { kind: "new-enterprise" }
+  | { kind: "new-site"; enterpriseId?: string }
   | { kind: "new-job" }
   | { kind: "new-incident" }
   | { kind: "invite-staff" }

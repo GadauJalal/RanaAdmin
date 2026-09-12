@@ -49,6 +49,7 @@ export function EnterpriseDrawer({ id }: { id: string }) {
   if (!enterprise) return <MissingRecord label="enterprise account" />;
 
   const requests = snapshot.siteRequests.filter(request => request.enterpriseId === id);
+  const sites = snapshot.sites.filter(site => site.enterpriseId === id);
   const incidents = snapshot.incidents.filter(
     incident => incident.enterprise === enterprise.name && incident.status !== "Resolved"
   );
@@ -138,6 +139,37 @@ export function EnterpriseDrawer({ id }: { id: string }) {
             />
           ))}
         </FunctionList>
+      </DetailSection>
+
+      <DetailSection
+        title="Sites"
+        action={
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => openOverlay({ kind: "new-site", enterpriseId: enterprise.id })}
+          >
+            Provision site
+          </button>
+        }
+      >
+        {sites.length ? (
+          <FunctionList>
+            {sites.map(site => (
+              <FunctionRow
+                key={site.id}
+                title={site.name}
+                meta={`${site.id} · ${site.region} · Created ${site.created}`}
+                trailing={<Chip>{site.status}</Chip>}
+              />
+            ))}
+          </FunctionList>
+        ) : (
+          <EmptyState
+            title="No sites yet"
+            description="Approve a site request from this enterprise, or provision a site directly."
+          />
+        )}
       </DetailSection>
 
       <DetailSection title="Open site requests">

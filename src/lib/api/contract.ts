@@ -17,6 +17,7 @@ import type {
   Enterprise,
   Incident,
   Job,
+  PlatformSite,
   Severity,
   Snapshot,
   StaffMember,
@@ -82,6 +83,13 @@ export interface SiteDecisionInput {
   id: string;
   decision: "Approved" | "Returned";
   reason: string;
+}
+
+/** Provision a site directly for an enterprise, without a site request. */
+export interface CreateSiteInput {
+  enterpriseId: string;
+  name: string;
+  address: string;
 }
 
 export interface CreateJobInput {
@@ -187,6 +195,8 @@ export interface OperationsApi {
   ): Promise<ApiResult<{ enterprise: Enterprise }>>;
 
   decideSiteRequest(input: SiteDecisionInput): Promise<ApiResult<undefined>>;
+
+  createSite(input: CreateSiteInput): Promise<ApiResult<{ site: PlatformSite }>>;
 
   createJob(input: CreateJobInput): Promise<ApiResult<{ job: Job }>>;
 

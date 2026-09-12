@@ -2,31 +2,35 @@
  * Live backend adapter for the Network Operations console.
  *
  * Talks to the real Rana54 API through the same-origin proxy at /api. The
- * backend is single-tenant and id-addressed: it has no platform-wide snapshot
- * and no list endpoints for enterprises, jobs, site requests, devices or
- * incidents. So this adapter:
+ * operational picture is assembled from the platform-wide list endpoints
+ * (`GET /organisations`, `/sites`, `/devices`, `/jobs`, `/site-requests`,
+ * `/audit`) plus the operator (`GET /me`), every platform user
+ * (`GET /admin/users`), the installer roster (`GET /installers`) and API
+ * health (`GET /health`). Each list is read independently and tolerantly, so a
+ * missing permission or an older backend empties one collection instead of
+ * failing the whole console.
  *
- *   - assembles the snapshot from what does exist: the operator (GET /me),
- *     every platform user (GET /admin/users), the installer roster
- *     (GET /installers) and API health (GET /health);
- *   - remembers the enterprises this console creates (locally) and re-hydrates
- *     each from GET /organisations/{id} on load, since they cannot be listed;
- *   - performs the real create/transition flows that have endpoints, including
- *     provisioning an enterprise's first administrator, whose one-time
- *     temporary password is surfaced once and never persisted;
- *   - refuses, with a plain message, the operations the backend does not model
- *     yet (incidents, enterprise suspension, support grants, diagnostics).
+ * Writes call the real workflow endpoints: create an enterprise and provision
+ * its first administrator (whose one-time temporary password is surfaced once
+ * and never persisted), provision a site, decide a site request, create,
+ * reassign, link and accept jobs, and suspend or restore staff and installers.
+ * Operations the backend does not model yet (incidents, enterprise suspension,
+ * support grants, diagnostics) are refused with a plain message.
  *
- * See docs/BACKEND_INTEGRATION_STATUS.md for the full gap list.
+ * See docs/BACKEND_INTEGRATION_STATUS.md for the remaining gap list.
  */
 
+import { operationalTimestamp } from "@/lib/format";
 import type {
+  AuditEvent,
   Device,
   Enterprise,
   Incident,
   Installer,
   Job,
   PlatformService,
+  PlatformSite,
+  SiteRequest,
   Snapshot,
   StaffMember,
   SupportGrant
@@ -39,6 +43,7 @@ import {
   type CreateEnterpriseInput,
   type CreateIncidentInput,
   type CreateJobInput,
+  type CreateSiteInput,
   type CreateSupportGrantInput,
   type EnterpriseTransitionInput,
   type ExportKind,
@@ -57,6 +62,9 @@ import {
 import { clearSession, getAccessToken, getRefreshToken, redirectToLogin, setTokens } from "./session";
 
 const BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api").replace(/\/$/, "");
+
+/** Page size for the platform lists (the backend caps `limit` at 200). */
+const PAGE = 200;
 
 /* -------------------------------------------------------------------------- */
 /* Backend wire shapes (only what this adapter reads)                          */
@@ -89,12 +97,60 @@ interface BackendInstaller {
 interface BackendOrganisation {
   id: string;
   name: string;
+  tradingName?: string | null;
+  email?: string;
+  createdAt?: string;
 }
 
-interface BackendOrgHeader {
-  organisationId: string;
+interface BackendSite {
+  id: string;
   name: string;
-  accessibleSiteCount: number;
+  organisationId: string;
+  region: string | null;
+  lifecycleStatus: string;
+  createdAt?: string;
+  address?: string | null;
+}
+
+interface BackendDevice {
+  id: string;
+  siteId: string;
+  serialNumber: string;
+  role: string;
+  transmissionIntervalS: number;
+  certStatus: string;
+  certExpiry: string | null;
+}
+
+interface BackendSiteRequest {
+  id: string;
+  organisationId: string;
+  type: string;
+  targetType: string | null;
+  targetId: string | null;
+  stage: string;
+  nextActor: string;
+  payload: Record<string, unknown> | null;
+  submittedAt: string;
+  submittedBy: string;
+  closedAt: string | null;
+  outcome: "approved" | "returned" | null;
+  contactName?: string | null;
+  contactPhone?: string | null;
+  accessNotes?: string | null;
+}
+
+interface BackendAuditEntry {
+  id: string;
+  at: string;
+  actorId: string;
+  actorName: string;
+  eventType: string;
+  entityType: string;
+  entityId: string;
+  outcome: "succeeded" | "failed" | string;
+  source: string;
+  payload: Record<string, unknown> | null;
 }
 
 interface BackendProvisionedUser {
@@ -112,7 +168,7 @@ interface BackendJob {
   scheduledAt: string | null;
   note: string | null;
   deviceId: string | null;
-  blockers: { reason: string }[];
+  blockers: { reason: string; note?: string | null }[];
 }
 
 interface BackendHealth {
@@ -244,7 +300,7 @@ function toFailure(outcome: { status: number; code: string; message: string }, s
 }
 
 /* -------------------------------------------------------------------------- */
-/* Local memory for records the backend cannot list                            */
+/* Local memory for what the backend does not store                            */
 /* -------------------------------------------------------------------------- */
 
 const ENTERPRISES_KEY = "ranaops.live.enterprises";
@@ -252,6 +308,11 @@ const ENTERPRISES_KEY = "ranaops.live.enterprises";
 /** Temporary passwords live only in memory for this session (shown once). */
 const sessionPasswords = new Map<string, string>();
 
+/**
+ * The console-side details of an enterprise the backend has no field for
+ * (region, products, the first administrator's name and user id). The
+ * organisation itself is always read from the backend list.
+ */
 function storedEnterprises(): Enterprise[] {
   if (typeof window === "undefined") return [];
   try {
@@ -281,8 +342,8 @@ function rememberEnterprise(enterprise: Enterprise) {
 /**
  * Read a list out of a response whether the backend sends a bare array or a
  * paginated envelope such as { installers: [...], total } or { items: [...] }.
- * A shape we do not recognise yields an empty list rather than a crash, so one
- * collection can never take the whole snapshot down.
+ * A failed request or a shape we do not recognise yields an empty list rather
+ * than a crash, so one collection can never take the whole snapshot down.
  */
 function asList<T>(outcome: RequestOutcome<unknown>, ...keys: string[]): T[] {
   if (!outcome.ok) return [];
@@ -315,6 +376,17 @@ function capitalise(value: string): string {
   return value ? value.charAt(0).toUpperCase() + value.slice(1).replace(/_/g, " ") : value;
 }
 
+/** "28 Aug 14:32" from an ISO timestamp, or a plain fallback. */
+function when(iso: string | null | undefined, fallback = "Not recorded"): string {
+  if (!iso) return fallback;
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : operationalTimestamp(date);
+}
+
+function regionLabel(region: string | null | undefined): string {
+  return region ? (REGION_LABELS[region] ?? capitalise(region)) : "Unassigned";
+}
+
 function mapStaff(user: BackendAdminUser): StaffMember {
   const status =
     user.status === "suspended" ? "Suspended" : user.status === "active" ? "Active" : "Invited";
@@ -331,7 +403,7 @@ function mapStaff(user: BackendAdminUser): StaffMember {
   };
 }
 
-function mapInstaller(installer: BackendInstaller): Installer {
+function mapInstaller(installer: BackendInstaller, jobs: BackendJob[]): Installer {
   const status =
     installer.status === "on_job"
       ? "On job"
@@ -342,12 +414,89 @@ function mapInstaller(installer: BackendInstaller): Installer {
   return {
     id: installer.id,
     name: installer.name,
-    region: installer.region ? (REGION_LABELS[installer.region] ?? installer.region) : "Unassigned",
+    region: regionLabel(installer.region),
     certification: installer.certExpiry ? `${cert} until ${installer.certExpiry.slice(0, 10)}` : cert,
     capacity: "Not reported",
     phone: installer.phone,
-    activeJobs: 0,
+    activeJobs: jobs.filter(job => job.installerId === installer.id && job.status !== "completed")
+      .length,
     status
+  };
+}
+
+const SITE_STATUS: Record<string, string> = {
+  provisioned: "Provisioned",
+  active: "Active",
+  decommissioned: "Decommissioned"
+};
+
+function mapSite(site: BackendSite, enterprises: BackendOrganisation[]): PlatformSite {
+  return {
+    id: site.id,
+    name: site.name,
+    enterpriseId: site.organisationId,
+    enterprise: enterprises.find(item => item.id === site.organisationId)?.name ?? site.organisationId,
+    region: regionLabel(site.region),
+    status: SITE_STATUS[site.lifecycleStatus] ?? capitalise(site.lifecycleStatus),
+    created: when(site.createdAt)
+  };
+}
+
+/**
+ * The backend organisation plus the console-side details remembered when it
+ * was created here (region, products, first administrator). Site counts and
+ * readiness are derived from the live sites list.
+ */
+function mapEnterprise(
+  org: BackendOrganisation,
+  sites: BackendSite[],
+  remembered: Enterprise[]
+): Enterprise {
+  const extra = remembered.find(item => item.id === org.id);
+  const orgSites = sites.filter(site => site.organisationId === org.id);
+  const liveSites = orgSites.filter(site => site.lifecycleStatus === "active").length;
+  const readiness = Math.min(
+    100,
+    20 + (extra?.adminUserId ? 20 : 0) + (orgSites.length ? 30 : 0) + (liveSites ? 30 : 0)
+  );
+  const password = sessionPasswords.get(org.id);
+  return {
+    id: org.id,
+    name: org.name,
+    region: extra?.region ?? "Nigeria",
+    status: liveSites ? "Active" : "Onboarding",
+    readiness,
+    adminName: extra?.adminName ?? null,
+    adminEmail: extra?.adminEmail ?? org.email ?? null,
+    products: extra?.products?.length ? extra.products : ["Energy workspace"],
+    sites: orgSites.length,
+    liveSites,
+    lastActivity: when(org.createdAt, "Not reported"),
+    adminUserId: extra?.adminUserId,
+    ...(password ? { adminTempPassword: password } : null)
+  };
+}
+
+function mapSiteRequest(
+  item: BackendSiteRequest,
+  enterprises: BackendOrganisation[],
+  users: BackendAdminUser[]
+): SiteRequest {
+  const payload = item.payload ?? {};
+  const functions = Array.isArray(payload.functions) ? payload.functions.map(String) : [];
+  const status =
+    item.outcome === "approved" ? "Approved" : item.outcome === "returned" ? "Returned" : "Pending review";
+  const submitter = users.find(user => user.id === item.submittedBy);
+  return {
+    id: item.id,
+    enterpriseId: item.organisationId,
+    enterprise: enterprises.find(org => org.id === item.organisationId)?.name ?? item.organisationId,
+    siteName: typeof payload.siteName === "string" && payload.siteName ? payload.siteName : "Unnamed site",
+    location: typeof payload.location === "string" ? payload.location : "",
+    requestedBy: item.contactName || submitter?.fullName || submitter?.email || "Organisation administrator",
+    submitted: when(item.submittedAt),
+    status,
+    functions
   };
 }
 
@@ -368,21 +517,90 @@ const JOB_PROGRESS: Record<string, number> = {
   completed: 100
 };
 
-function mapJob(job: BackendJob, installers: Installer[], enterprises: Enterprise[]): Job {
+interface Lookups {
+  enterprises: BackendOrganisation[];
+  sites: BackendSite[];
+  installers: BackendInstaller[];
+  siteRequests: BackendSiteRequest[];
+}
+
+function siteNameFor(job: BackendJob, lookups: Lookups): string {
+  const site = lookups.sites.find(item => item.id === job.siteId);
+  if (site) return site.name;
+  const request = lookups.siteRequests.find(item => item.id === job.requestId);
+  const name = request?.payload?.siteName;
+  return typeof name === "string" && name ? name : "Site pending";
+}
+
+function mapJob(job: BackendJob, lookups: Lookups): Job {
   return {
     id: job.id,
     enterpriseId: job.organisationId,
-    enterprise: enterprises.find(item => item.id === job.organisationId)?.name ?? job.organisationId,
+    enterprise:
+      lookups.enterprises.find(item => item.id === job.organisationId)?.name ?? job.organisationId,
     siteRequestId: job.requestId,
-    site: job.siteId ?? "Site pending",
+    site: siteNameFor(job, lookups),
     installerId: job.installerId,
-    installer: installers.find(item => item.id === job.installerId)?.name ?? job.installerId,
+    installer: lookups.installers.find(item => item.id === job.installerId)?.name ?? job.installerId,
     status: JOB_STATUS[job.status] ?? capitalise(job.status),
-    scheduled: job.scheduledAt ?? "Unscheduled",
+    scheduled: when(job.scheduledAt, "Unscheduled"),
     progress: JOB_PROGRESS[job.status] ?? 0,
-    blockers: job.blockers.map(blocker => blocker.reason),
+    blockers: job.blockers.map(blocker =>
+      blocker.note ? `${capitalise(blocker.reason)}: ${blocker.note}` : capitalise(blocker.reason)
+    ),
     checklist: [],
     linkedDevice: job.deviceId
+  };
+}
+
+const DEVICE_ROLE: Record<string, string> = {
+  grid: "Grid meter",
+  inverter_output: "Inverter output meter"
+};
+
+const DEVICE_STATUS: Record<string, string> = {
+  certified: "Certified",
+  pending: "Pending certification",
+  expired: "Certificate expired",
+  uncertified: "Uncertified"
+};
+
+function mapDevice(device: BackendDevice, lookups: Lookups, jobs: BackendJob[]): Device {
+  const site = lookups.sites.find(item => item.id === device.siteId);
+  const enterprise = lookups.enterprises.find(item => item.id === site?.organisationId);
+  const job = jobs.find(item => item.deviceId === device.id);
+  const role = DEVICE_ROLE[device.role] ?? capitalise(device.role);
+  return {
+    id: device.id,
+    serial: device.serialNumber,
+    type: role,
+    enterprise: enterprise?.name ?? site?.organisationId ?? "Unknown enterprise",
+    enterpriseId: site?.organisationId ?? "",
+    site: site?.name ?? device.siteId,
+    status: DEVICE_STATUS[device.certStatus] ?? capitalise(device.certStatus),
+    heartbeat: device.transmissionIntervalS
+      ? `Reports every ${device.transmissionIntervalS}s`
+      : "Not reported",
+    firmware: "Not reported",
+    jobId: job?.id ?? "",
+    functions: [{ name: role, source: "Measured", state: capitalise(device.certStatus) }],
+    lastDiagnostic: device.certExpiry
+      ? `Certificate valid until ${device.certExpiry.slice(0, 10)}`
+      : "Not run"
+  };
+}
+
+function mapAudit(entry: BackendAuditEntry): AuditEvent {
+  const payload = entry.payload ?? {};
+  const reason = typeof payload.reason === "string" ? payload.reason : "";
+  return {
+    id: entry.id,
+    time: when(entry.at),
+    actor: entry.actorName || entry.actorId,
+    action: capitalise(entry.eventType),
+    entity: `${capitalise(entry.entityType)} ${entry.entityId}`,
+    outcome: capitalise(entry.outcome),
+    reason
   };
 }
 
@@ -417,12 +635,19 @@ function mapHealth(health: BackendHealth | null): PlatformService[] {
 const EMPTY_OPERATOR = { name: "Operator", scope: "Rana54 platform", permission: "Platform access" };
 
 async function buildSnapshot(): Promise<Snapshot> {
-  const [me, users, installers, health] = await Promise.all([
-    request<BackendIdentity>("/me"),
-    request<BackendAdminUser[]>("/admin/users"),
-    request<BackendInstaller[]>("/installers?limit=200"),
-    request<BackendHealth>("/health")
-  ]);
+  const [me, users, installers, health, organisations, sites, devices, jobs, siteRequests, audit] =
+    await Promise.all([
+      request<BackendIdentity>("/me"),
+      request<unknown>("/admin/users"),
+      request<unknown>(`/installers?limit=${PAGE}`),
+      request<BackendHealth>("/health"),
+      request<unknown>(`/organisations?limit=${PAGE}`),
+      request<unknown>(`/sites?limit=${PAGE}`),
+      request<unknown>(`/devices?limit=${PAGE}`),
+      request<unknown>(`/jobs?limit=${PAGE}`),
+      request<unknown>(`/site-requests?limit=${PAGE}`),
+      request<unknown>(`/audit?limit=${PAGE}`)
+    ]);
 
   if (!me.ok && me.status === 401) {
     throw new Error("Sign in to load the operational picture.");
@@ -436,31 +661,46 @@ async function buildSnapshot(): Promise<Snapshot> {
       }
     : EMPTY_OPERATOR;
 
-  // Enterprises cannot be listed; re-hydrate the ones this console created.
+  const orgRows = asList<BackendOrganisation>(organisations, "organisations");
+  const siteRows = asList<BackendSite>(sites, "sites");
+  const deviceRows = asList<BackendDevice>(devices, "devices");
+  const jobRows = asList<BackendJob>(jobs, "jobs");
+  const requestRows = asList<BackendSiteRequest>(siteRequests, "siteRequests");
+  const auditRows = asList<BackendAuditEntry>(audit, "entries");
+  const userRows = asList<BackendAdminUser>(users, "users");
+  const installerRows = asList<BackendInstaller>(installers, "installers");
+
+  // Enterprises this console created but the list did not return (an older
+  // backend, or beyond the first page) are still shown from local memory.
   const remembered = storedEnterprises();
-  const enterprises = await Promise.all(
-    remembered.map(async enterprise => {
-      const header = await request<BackendOrgHeader>(`/organisations/${encodeURIComponent(enterprise.id)}`);
-      const refreshed: Enterprise = header.ok
-        ? { ...enterprise, name: header.body.name, sites: header.body.accessibleSiteCount }
-        : enterprise;
-      const password = sessionPasswords.get(enterprise.id);
-      return password ? { ...refreshed, adminTempPassword: password } : refreshed;
-    })
-  );
+  const listed = new Set(orgRows.map(org => org.id));
+  const allOrgs: BackendOrganisation[] = [
+    ...orgRows,
+    ...remembered
+      .filter(item => !listed.has(item.id))
+      .map(item => ({ id: item.id, name: item.name, email: item.adminEmail ?? undefined }))
+  ];
+
+  const lookups: Lookups = {
+    enterprises: allOrgs,
+    sites: siteRows,
+    installers: installerRows,
+    siteRequests: requestRows
+  };
 
   return {
     currentOperator,
-    enterprises,
-    siteRequests: [],
-    installers: asList<BackendInstaller>(installers, "installers").map(mapInstaller),
-    jobs: [],
-    devices: [],
+    enterprises: allOrgs.map(org => mapEnterprise(org, siteRows, remembered)),
+    sites: siteRows.map(site => mapSite(site, allOrgs)),
+    siteRequests: requestRows.map(item => mapSiteRequest(item, allOrgs, userRows)),
+    installers: installerRows.map(installer => mapInstaller(installer, jobRows)),
+    jobs: jobRows.map(job => mapJob(job, lookups)),
+    devices: deviceRows.map(device => mapDevice(device, lookups, jobRows)),
     incidents: [],
-    staff: asList<BackendAdminUser>(users, "users").map(mapStaff),
+    staff: userRows.map(mapStaff),
     supportGrants: [],
     services: mapHealth(health.ok ? health.body : null),
-    audit: []
+    audit: auditRows.map(mapAudit)
   };
 }
 
@@ -471,6 +711,14 @@ async function ok<T>(data: T): Promise<ApiResult<T>> {
 function notAvailable<T>(what: string): Promise<ApiResult<T>> {
   return Promise.resolve(
     failure("server_error", `${what} is not available on the backend yet.`)
+  );
+}
+
+/** Find the job in a freshly built snapshot, falling back to a direct mapping. */
+function jobFromSnapshot(snapshot: Snapshot, job: BackendJob): Job {
+  return (
+    snapshot.jobs.find(item => item.id === job.id) ??
+    mapJob(job, { enterprises: [], sites: [], installers: [], siteRequests: [] })
   );
 }
 
@@ -506,7 +754,7 @@ export const httpAdapter: OperationsApi = {
       name: created.body.name,
       region: input.region,
       status: input.status || "Onboarding",
-      readiness: input.status === "Active" ? 35 : 18,
+      readiness: 20,
       adminName: input.adminName.trim(),
       adminEmail: input.adminEmail.trim(),
       products: input.products.length ? input.products : ["Energy workspace"],
@@ -537,7 +785,10 @@ export const httpAdapter: OperationsApi = {
     enterprise.adminTempPassword = provisioned.body.tempPassword;
     sessionPasswords.set(enterprise.id, provisioned.body.tempPassword);
     rememberEnterprise(enterprise);
-    return ok({ enterprise });
+
+    const snapshot = await buildSnapshot();
+    const listed = snapshot.enterprises.find(item => item.id === enterprise.id);
+    return { ok: true, snapshot, data: { enterprise: listed ?? enterprise } };
   },
 
   transitionEnterprise(_input: EnterpriseTransitionInput) {
@@ -554,6 +805,7 @@ export const httpAdapter: OperationsApi = {
     return ok({ enterprise });
   },
 
+  /** Approve or return a site request. Approval is what creates the site. */
   async decideSiteRequest({ id, decision, reason }: SiteDecisionInput) {
     const result = await post<unknown>(`/site-requests/${encodeURIComponent(id)}/decision`, {
       decision: decision.toLowerCase(),
@@ -561,6 +813,33 @@ export const httpAdapter: OperationsApi = {
     });
     if (!result.ok) return toFailure(result);
     return ok(undefined);
+  },
+
+  /** Provision a site directly for an enterprise (POST /admin/sites). */
+  async createSite(input: CreateSiteInput) {
+    const result = await post<BackendSite | { site: BackendSite }>("/admin/sites", {
+      organisationId: input.enterpriseId,
+      name: input.name.trim(),
+      address: input.address.trim()
+    });
+    if (!result.ok) return toFailure(result);
+
+    const body = result.body as { site?: BackendSite } & Partial<BackendSite>;
+    const created = body.site ?? (body as BackendSite);
+    const snapshot = await buildSnapshot();
+    const site =
+      snapshot.sites.find(item => item.id === created.id) ??
+      ({
+        id: created.id ?? "",
+        name: created.name ?? input.name.trim(),
+        enterpriseId: input.enterpriseId,
+        enterprise:
+          snapshot.enterprises.find(item => item.id === input.enterpriseId)?.name ?? input.enterpriseId,
+        region: regionLabel(created.region),
+        status: SITE_STATUS[created.lifecycleStatus ?? "provisioned"] ?? "Provisioned",
+        created: "Just now"
+      } satisfies PlatformSite);
+    return { ok: true, snapshot, data: { site } };
   },
 
   async createJob(input: CreateJobInput) {
@@ -578,7 +857,7 @@ export const httpAdapter: OperationsApi = {
     });
     if (!result.ok) return toFailure(result);
     const snapshot = await buildSnapshot();
-    return { ok: true, snapshot, data: { job: mapJob(result.body.job, snapshot.installers, snapshot.enterprises) } };
+    return { ok: true, snapshot, data: { job: jobFromSnapshot(snapshot, result.body.job) } };
   },
 
   async reassignJob({ id, installerId, reason }: ReassignJobInput) {
@@ -588,7 +867,7 @@ export const httpAdapter: OperationsApi = {
     });
     if (!result.ok) return toFailure(result);
     const snapshot = await buildSnapshot();
-    return { ok: true, snapshot, data: { job: mapJob(result.body.job, snapshot.installers, snapshot.enterprises) } };
+    return { ok: true, snapshot, data: { job: jobFromSnapshot(snapshot, result.body.job) } };
   },
 
   async linkGateway({ jobId, serial, reason }: LinkGatewayInput) {
@@ -598,13 +877,14 @@ export const httpAdapter: OperationsApi = {
     });
     if (!result.ok) return toFailure(result, await buildSnapshot());
     const job = result.body.job;
-    const device: Device = {
+    const snapshot = await buildSnapshot();
+    const device: Device = snapshot.devices.find(item => item.id === job.deviceId) ?? {
       id: job.deviceId ?? serial,
       serial,
       type: "Gateway",
-      enterprise: job.organisationId,
+      enterprise: snapshot.enterprises.find(item => item.id === job.organisationId)?.name ?? job.organisationId,
       enterpriseId: job.organisationId,
-      site: job.siteId ?? "Site pending",
+      site: snapshot.sites.find(item => item.id === job.siteId)?.name ?? "Site pending",
       status: "Testing",
       heartbeat: "Awaiting first reading",
       firmware: "Not reported",
@@ -612,14 +892,14 @@ export const httpAdapter: OperationsApi = {
       functions: [],
       lastDiagnostic: "Not run"
     };
-    return ok<LinkGatewayResult>({ device });
+    return { ok: true, snapshot, data: { device } satisfies LinkGatewayResult };
   },
 
   async acceptInstallation({ jobId, reason }: AcceptInstallationInput) {
     const result = await post<{ job: BackendJob }>(`/jobs/${encodeURIComponent(jobId)}/acceptance`, { reason });
     if (!result.ok) return toFailure(result);
     const snapshot = await buildSnapshot();
-    return { ok: true, snapshot, data: { job: mapJob(result.body.job, snapshot.installers, snapshot.enterprises) } };
+    return { ok: true, snapshot, data: { job: jobFromSnapshot(snapshot, result.body.job) } };
   },
 
   async transitionInstaller({ id, transition, reason }: InstallerTransitionInput) {
