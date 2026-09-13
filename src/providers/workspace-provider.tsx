@@ -44,6 +44,7 @@ export type Overlay =
   | { kind: "installer-transition"; id: string; transition: "Suspend" | "Restore" }
   | { kind: "reassign-job"; id: string }
   | { kind: "link-gateway"; id: string }
+  | { kind: "unlink-gateway"; id: string }
   | { kind: "accept-installation"; id: string }
   | { kind: "reissue-admin"; id: string };
 

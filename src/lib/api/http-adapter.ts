@@ -57,7 +57,8 @@ import {
   type ReassignJobInput,
   type ReissueAdminInviteInput,
   type SiteDecisionInput,
-  type StaffTransitionInput
+  type StaffTransitionInput,
+  type UnlinkGatewayInput
 } from "./contract";
 import { clearSession, getAccessToken, getRefreshToken, redirectToLogin, setTokens } from "./session";
 
@@ -275,6 +276,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<Request
 
 function post<T>(path: string, payload?: unknown) {
   return request<T>(path, { method: "POST", body: payload === undefined ? undefined : JSON.stringify(payload) });
+}
+
+function del<T>(path: string) {
+  return request<T>(path, { method: "DELETE" });
 }
 
 /** Map a backend rejection to the console's failure vocabulary. */
@@ -893,6 +898,18 @@ export const httpAdapter: OperationsApi = {
       lastDiagnostic: "Not run"
     };
     return { ok: true, snapshot, data: { device } satisfies LinkGatewayResult };
+  },
+
+  /**
+   * Unlink the job's gateway (DELETE /jobs/{id}/devices/gateway). The backend
+   * takes no body; the reason is kept for the operator's confirmation only.
+   * Only a job in progress can be unlinked; the backend answers 409 otherwise.
+   */
+  async unlinkGateway({ jobId }: UnlinkGatewayInput) {
+    const result = await del<{ job: BackendJob }>(`/jobs/${encodeURIComponent(jobId)}/devices/gateway`);
+    if (!result.ok) return toFailure(result);
+    const snapshot = await buildSnapshot();
+    return { ok: true, snapshot, data: { job: jobFromSnapshot(snapshot, result.body.job) } };
   },
 
   async acceptInstallation({ jobId, reason }: AcceptInstallationInput) {

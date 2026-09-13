@@ -25,7 +25,8 @@ import {
   ReissueAdminModal,
   SiteDecisionModal,
   StaffTransitionModal,
-  SupportGrantModal
+  SupportGrantModal,
+  UnlinkGatewayModal
 } from "@/components/modals/WorkflowModals";
 import { useWorkspace, type Overlay } from "@/providers/workspace-provider";
 
@@ -73,6 +74,8 @@ function renderOverlay(overlay: Overlay) {
       return <ReassignJobModal id={overlay.id} />;
     case "link-gateway":
       return <LinkGatewayModal id={overlay.id} />;
+    case "unlink-gateway":
+      return <UnlinkGatewayModal id={overlay.id} />;
     case "accept-installation":
       return <AcceptInstallationModal id={overlay.id} />;
     case "reissue-admin":
