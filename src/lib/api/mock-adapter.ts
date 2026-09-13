@@ -40,7 +40,8 @@ import {
   type ReassignJobInput,
   type ReissueAdminInviteInput,
   type SiteDecisionInput,
-  type StaffTransitionInput
+  type StaffTransitionInput,
+  type UnlinkGatewayInput
 } from "./contract";
 
 export const STORAGE_KEY = "rana54-control-centre-v2-state";
@@ -409,6 +410,27 @@ export const mockAdapter: OperationsApi = {
 
     audit(snapshot, "Gateway linked", device.id, "Testing", `${job.id}. ${input.reason.trim()}`);
     return ok(snapshot, { device });
+  },
+
+  async unlinkGateway(input: UnlinkGatewayInput) {
+    const snapshot = draft();
+    const job = snapshot.jobs.find(item => item.id === input.jobId);
+    if (!job) return failure("not_found", "That job no longer exists.");
+    if (!job.linkedDevice) return failure("invalid_input", "This job has no gateway to unlink.");
+    if (job.status !== "In progress") {
+      return failure("invalid_input", "Only a job in progress can have its gateway unlinked.");
+    }
+
+    const deviceId = job.linkedDevice;
+    snapshot.devices = snapshot.devices.filter(item => item.id !== deviceId);
+    job.linkedDevice = null;
+    job.status = "Scheduled";
+    job.progress = Math.min(job.progress, 18);
+    job.checklist = job.checklist.filter(step => step !== "Gateway identity linked");
+    job.checklist.push("Gateway unlinked for rescan");
+
+    audit(snapshot, "Gateway unlinked", deviceId, "Scheduled", `${job.id}. ${input.reason.trim()}`);
+    return ok(snapshot, { job });
   },
 
   async acceptInstallation(input: AcceptInstallationInput) {

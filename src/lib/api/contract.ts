@@ -112,6 +112,12 @@ export interface LinkGatewayInput {
   reason: string;
 }
 
+/** Unlink a mis-scanned gateway so the job can be scanned again. */
+export interface UnlinkGatewayInput {
+  jobId: string;
+  reason: string;
+}
+
 export interface AcceptInstallationInput {
   jobId: string;
   reason: string;
@@ -203,6 +209,8 @@ export interface OperationsApi {
   reassignJob(input: ReassignJobInput): Promise<ApiResult<{ job: Job }>>;
 
   linkGateway(input: LinkGatewayInput): Promise<ApiResult<LinkGatewayResult>>;
+
+  unlinkGateway(input: UnlinkGatewayInput): Promise<ApiResult<{ job: Job }>>;
 
   acceptInstallation(
     input: AcceptInstallationInput

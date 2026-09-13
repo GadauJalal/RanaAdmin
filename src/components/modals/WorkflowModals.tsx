@@ -544,6 +544,41 @@ export function LinkGatewayModal({ id }: { id: string }) {
   );
 }
 
+export function UnlinkGatewayModal({ id }: { id: string }) {
+  const snapshot = useSnapshot();
+  const { run, openOverlay } = useWorkspace();
+  const job = snapshot.jobs.find(item => item.id === id);
+  if (!job) return null;
+
+  return (
+    <ReasonModal
+      title="Unlink gateway"
+      description={`${job.site} · ${job.id}`}
+      formId="unlink-gateway-form"
+      submitLabel="Unlink and reset to scheduled"
+      submitTone="btn-danger"
+      label="Correction reason"
+      placeholder="Why the linked gateway is wrong (for example a mis-scanned serial)"
+      notice={
+        <Notice icon="shield" tone="warning">
+          The job returns to scheduled so the installer can scan again. Link history is retained
+          in the audit trail; only a job in progress can be unlinked.
+        </Notice>
+      }
+      onSubmit={reason =>
+        void run(() => api.unlinkGateway({ jobId: id, reason }), {
+          failureTitle: "Gateway could not be unlinked",
+          success: ({ job: updated }) => ({
+            title: "Gateway unlinked",
+            detail: `${updated.id} is back to ${String(updated.status).toLowerCase()} and ready for a rescan.`
+          }),
+          onSuccess: ({ job: updated }) => openOverlay({ kind: "job", id: updated.id })
+        })
+      }
+    />
+  );
+}
+
 export function AcceptInstallationModal({ id }: { id: string }) {
   const snapshot = useSnapshot();
   const { run } = useWorkspace();

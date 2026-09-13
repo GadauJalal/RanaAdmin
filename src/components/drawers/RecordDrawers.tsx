@@ -295,6 +295,7 @@ export function JobDrawer({ id }: { id: string }) {
   const approved = request?.status === "Approved";
   const canAccept = job.status === "Ready for acceptance";
   const canLink = approved && !job.linkedDevice && job.status !== "Completed";
+  const canUnlink = Boolean(job.linkedDevice) && job.status === "In progress";
 
   return (
     <Drawer
@@ -372,6 +373,14 @@ export function JobDrawer({ id }: { id: string }) {
               onClick={() => openOverlay({ kind: "link-gateway", id: job.id })}
             >
               Link gateway
+            </button>
+          ) : canUnlink ? (
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => openOverlay({ kind: "unlink-gateway", id: job.id })}
+            >
+              Unlink gateway
             </button>
           ) : undefined
         }
