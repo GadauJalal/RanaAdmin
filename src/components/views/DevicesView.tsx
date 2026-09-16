@@ -90,9 +90,18 @@ export function DevicesView() {
         title="Devices"
         description="Inspect gateway identity, firmware, heartbeat, and mapped energy functions. Raw readings remain immutable."
         actions={
-          <button type="button" className="btn btn-secondary" onClick={exportInventory}>
-            <Icon name="download" /> Export inventory
-          </button>
+          <>
+            <button type="button" className="btn btn-secondary" onClick={exportInventory}>
+              <Icon name="download" /> Export inventory
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => openOverlay({ kind: "register-device" })}
+            >
+              <Icon name="plus" /> Register device
+            </button>
+          </>
         }
       />
 

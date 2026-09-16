@@ -22,10 +22,13 @@ import { SNAPSHOT_COLLECTIONS, type Device, type Snapshot } from "@/lib/types";
 
 import {
   failure,
+  NIGERIAN_REGIONS,
+  STAFF_CHECKLIST,
   type AcceptInstallationInput,
   type ApiResult,
   type CreateEnterpriseInput,
   type CreateIncidentInput,
+  type CreateInstallerInput,
   type CreateJobInput,
   type CreateSiteInput,
   type CreateSupportGrantInput,
@@ -34,13 +37,20 @@ import {
   type IncidentTransitionInput,
   type InstallerTransitionInput,
   type InviteStaffInput,
+  type JobDetail,
   type LinkGatewayInput,
   type LinkGatewayResult,
+  type NotificationItem,
+  type NotificationList,
   type OperationsApi,
   type ReassignJobInput,
+  type RecordChecklistItemInput,
+  type RegisterDeviceInput,
   type ReissueAdminInviteInput,
+  type SetSiteLifecycleInput,
   type SiteDecisionInput,
   type StaffTransitionInput,
+  type UnblockJobInput,
   type UnlinkGatewayInput
 } from "./contract";
 
@@ -116,6 +126,45 @@ function ok<T>(snapshot: Snapshot, data: T): ApiResult<T> {
 }
 
 const suffix = () => String(Date.now()).slice(-4);
+
+/** Notifications the operator has cleared this session. The inbox itself is derived. */
+const readNotifications = new Set<string>();
+
+const DEVICE_ROLE_LABEL: Record<string, string> = {
+  grid: "Grid meter",
+  inverter_output: "Inverter output meter"
+};
+
+const DEVICE_CERT_LABEL: Record<string, string> = {
+  certified: "Certified",
+  pending: "Pending certification",
+  expired: "Certificate expired",
+  uncertified: "Uncertified"
+};
+
+const capitalise = (value: string) =>
+  value ? value.charAt(0).toUpperCase() + value.slice(1).replace(/_/g, " ") : value;
+
+/**
+ * The prototype inbox is the open incident queue: one entry per open incident,
+ * linked to the job its device came from when there is one.
+ */
+function notificationsFrom(snapshot: Snapshot): NotificationItem[] {
+  return snapshot.incidents
+    .filter(incident => incident.status === "Open")
+    .map(incident => {
+      const device = snapshot.devices.find(item => item.id === incident.deviceId);
+      const id = `NTF-${incident.id}`;
+      return {
+        id,
+        title: incident.title,
+        detail: `${incident.severity} incident · ${incident.enterprise} · ${incident.sla}`,
+        createdAt: incident.age,
+        read: readNotifications.has(id),
+        ...(device?.jobId ? { jobId: device.jobId } : null)
+      };
+    });
+}
 
 export const mockAdapter: OperationsApi = {
   async getSnapshot() {
@@ -491,6 +540,162 @@ export const mockAdapter: OperationsApi = {
       input.reason.trim()
     );
     return ok(snapshot, undefined);
+  },
+
+  async createInstaller(input: CreateInstallerInput) {
+    const snapshot = draft();
+    const name = input.name.trim() || input.fullName.trim();
+    if (!name || !input.email.trim()) {
+      return failure("invalid_input", "An installer needs a name and an email address.");
+    }
+    const region = NIGERIAN_REGIONS.find(item => item.value === input.region)?.label ?? capitalise(input.region);
+    const cert = capitalise(input.certStatus);
+    const installer = {
+      id: `INS-NEW-${suffix()}`,
+      name,
+      region,
+      certification: input.certExpiry ? `${cert} until ${input.certExpiry.slice(0, 10)}` : cert,
+      capacity: "3 slots",
+      phone: input.phone.trim(),
+      activeJobs: 0,
+      status: "Available"
+    };
+    snapshot.installers.unshift(installer);
+    audit(
+      snapshot,
+      "Installer added",
+      installer.id,
+      "Invitation issued",
+      `Activation link sent to ${maskEmail(input.email.trim())}`
+    );
+    return ok(snapshot, { installer });
+  },
+
+  async registerDevice(input: RegisterDeviceInput) {
+    const snapshot = draft();
+    const site = snapshot.sites.find(item => item.id === input.siteId);
+    if (!site) return failure("not_found", "That site no longer exists.");
+
+    const serial = input.serialNumber.trim().toUpperCase();
+    if (!serial) return failure("invalid_input", "A serial number is required.");
+    const duplicate = snapshot.devices.find(item => item.serial.toUpperCase() === serial);
+    if (duplicate) {
+      return failure(
+        "invalid_input",
+        `Serial ${serial} is already registered as ${duplicate.id} at ${duplicate.site}.`
+      );
+    }
+
+    const role = DEVICE_ROLE_LABEL[input.role] ?? capitalise(input.role);
+    const cert = DEVICE_CERT_LABEL[input.certStatus] ?? capitalise(input.certStatus);
+    const device: Device = {
+      id: `GW-R54-NEW-${serial.replace(/[^A-Z0-9]/g, "").slice(-4)}`,
+      serial,
+      type: role,
+      enterprise: site.enterprise,
+      enterpriseId: site.enterpriseId,
+      site: site.name,
+      status: cert,
+      heartbeat: `Reports every ${input.transmissionIntervalS}s`,
+      firmware: "Not reported",
+      jobId: "",
+      functions: [{ name: role, source: "Measured", state: cert }],
+      lastDiagnostic: input.certExpiry
+        ? `Certificate valid until ${input.certExpiry.slice(0, 10)}`
+        : "Not run"
+    };
+    snapshot.devices.unshift(device);
+    audit(snapshot, "Device registered", device.id, cert, `${serial} at ${site.name}`);
+    return ok(snapshot, { device });
+  },
+
+  async unblockJob(input: UnblockJobInput) {
+    const snapshot = draft();
+    const job = snapshot.jobs.find(item => item.id === input.jobId);
+    if (!job) return failure("not_found", "That installation job no longer exists.");
+    if (job.status !== "Blocked") {
+      return failure("job_not_blocked", "Only a blocked job can be resumed.");
+    }
+
+    job.status = job.linkedDevice ? "In progress" : "Scheduled";
+    job.blockers = [];
+    job.checklist.push("Blocker resolved");
+    audit(snapshot, "Installation job unblocked", job.id, job.status, input.resolutionNote.trim());
+    return ok(snapshot, { job });
+  },
+
+  async getJobDetail(jobId: string): Promise<JobDetail> {
+    const job = read().jobs.find(item => item.id === jobId);
+    if (!job) throw new Error("That installation job no longer exists.");
+    return { checklist: [...job.checklist], notes: [] };
+  },
+
+  async recordChecklistItem(input: RecordChecklistItemInput) {
+    const snapshot = draft();
+    const job = snapshot.jobs.find(item => item.id === input.jobId);
+    if (!job) return failure("not_found", "That installation job no longer exists.");
+    if (job.status === "Completed") {
+      return failure("invalid_input", "A completed job's evidence is append-only history.");
+    }
+    if (job.checklist.includes(input.item)) {
+      return failure("invalid_input", `${input.item} was already recorded for ${job.id}.`);
+    }
+
+    job.checklist.push(input.item);
+    const recorded = STAFF_CHECKLIST.filter(item => job.checklist.includes(item)).length;
+    job.progress = Math.max(job.progress, recorded * 25);
+    if (recorded === STAFF_CHECKLIST.length && job.status !== "Blocked") {
+      job.status = "Ready for acceptance";
+    }
+
+    audit(snapshot, "Commissioning evidence recorded", job.id, input.item, `${recorded} of ${STAFF_CHECKLIST.length} staff items recorded`);
+    return ok(snapshot, { checklistItem: { item: input.item, recordedAt: operationalTimestamp() } });
+  },
+
+  async setSiteLifecycle(input: SetSiteLifecycleInput) {
+    const snapshot = draft();
+    const site = snapshot.sites.find(item => item.id === input.siteId);
+    if (!site) return failure("not_found", "That site no longer exists.");
+
+    const target = input.status === "active" ? "Active" : "Decommissioned";
+    const legal =
+      (site.status === "Provisioned" && (target === "Active" || target === "Decommissioned")) ||
+      (site.status === "Active" && target === "Decommissioned");
+    if (!legal) {
+      return failure(
+        "invalid_input",
+        `A ${String(site.status).toLowerCase()} site cannot move to ${target.toLowerCase()}.`
+      );
+    }
+
+    const enterprise = snapshot.enterprises.find(item => item.id === site.enterpriseId);
+    if (enterprise) {
+      if (target === "Active") enterprise.liveSites = Math.min(enterprise.sites, enterprise.liveSites + 1);
+      if (site.status === "Active" && target === "Decommissioned") {
+        enterprise.liveSites = Math.max(0, enterprise.liveSites - 1);
+      }
+      enterprise.lastActivity = "Just now";
+    }
+    site.status = target;
+
+    audit(snapshot, `Site ${target.toLowerCase()}`, site.id, target, input.reason.trim());
+    return ok(snapshot, { site });
+  },
+
+  async listNotifications(): Promise<NotificationList> {
+    const items = notificationsFrom(read());
+    return { items, unreadCount: items.filter(item => !item.read).length };
+  },
+
+  async markNotificationRead(id: string) {
+    const known = notificationsFrom(read()).some(item => item.id === id);
+    if (!known) return failure("not_found", "That notification is no longer in the inbox.");
+    readNotifications.add(id);
+    return { ok: true as const };
+  },
+
+  async unreadNotificationCount() {
+    return notificationsFrom(read()).filter(item => !item.read).length;
   },
 
   async createIncident(input: CreateIncidentInput) {

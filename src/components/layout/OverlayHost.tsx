@@ -19,13 +19,17 @@ import {
   LinkGatewayModal,
   NewEnterpriseModal,
   NewIncidentModal,
+  NewInstallerModal,
   NewJobModal,
   NewSiteModal,
   ReassignJobModal,
+  RegisterDeviceModal,
   ReissueAdminModal,
   SiteDecisionModal,
+  SiteLifecycleModal,
   StaffTransitionModal,
   SupportGrantModal,
+  UnblockJobModal,
   UnlinkGatewayModal
 } from "@/components/modals/WorkflowModals";
 import { useWorkspace, type Overlay } from "@/providers/workspace-provider";
@@ -54,6 +58,14 @@ function renderOverlay(overlay: Overlay) {
       return <NewSiteModal enterpriseId={overlay.enterpriseId} />;
     case "new-job":
       return <NewJobModal />;
+    case "new-installer":
+      return <NewInstallerModal />;
+    case "register-device":
+      return <RegisterDeviceModal siteId={overlay.siteId} />;
+    case "unblock-job":
+      return <UnblockJobModal id={overlay.id} />;
+    case "site-lifecycle":
+      return <SiteLifecycleModal id={overlay.id} status={overlay.status} />;
     case "new-incident":
       return <NewIncidentModal />;
     case "invite-staff":

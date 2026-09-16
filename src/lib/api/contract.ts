@@ -16,6 +16,7 @@ import type {
   Device,
   Enterprise,
   Incident,
+  Installer,
   Job,
   PlatformSite,
   Severity,
@@ -33,6 +34,7 @@ export type FailureCode =
   | "installer_has_active_jobs"
   | "final_platform_operator"
   | "job_not_ready_for_acceptance"
+  | "job_not_blocked"
   | "network_error"
   | "server_error";
 
@@ -52,6 +54,9 @@ export interface ApiFailure {
 }
 
 export type ApiResult<T = undefined> = ApiSuccess<T> | ApiFailure;
+
+/** A write that changes nothing in the operational picture, so carries no snapshot. */
+export type PlainResult = { ok: true } | ApiFailure;
 
 /* -------------------------------------------------------------------------- */
 /* Request payloads                                                            */
@@ -129,6 +134,87 @@ export interface InstallerTransitionInput {
   reason: string;
 }
 
+/** The backend's region vocabulary for installers and sites. */
+export const NIGERIAN_REGIONS = [
+  { value: "north_central", label: "North Central" },
+  { value: "north_east", label: "North East" },
+  { value: "north_west", label: "North West" },
+  { value: "south_east", label: "South East" },
+  { value: "south_south", label: "South South" },
+  { value: "south_west", label: "South West" }
+] as const;
+
+export type NigerianRegion = (typeof NIGERIAN_REGIONS)[number]["value"];
+
+export type InstallerCertStatus = "current" | "expiring" | "expired";
+
+/** Onboard an installer: creates their pending account and roster entry. */
+export interface CreateInstallerInput {
+  email: string;
+  /** Name on the user account. */
+  fullName: string;
+  /** Name shown on the roster (usually the same). */
+  name: string;
+  phone: string;
+  region: NigerianRegion | string;
+  certStatus: InstallerCertStatus;
+  /** ISO date; omitted when the certificate has no recorded expiry. */
+  certExpiry?: string;
+}
+
+export type DeviceRole = "grid" | "inverter_output";
+
+export type DeviceCertStatus = "certified" | "pending" | "expired" | "uncertified";
+
+/** Register a metering device against a site so a job can later link it. */
+export interface RegisterDeviceInput {
+  siteId: string;
+  serialNumber: string;
+  role: DeviceRole;
+  transmissionIntervalS: number;
+  certStatus: DeviceCertStatus;
+  /** ISO date; omitted when the certificate has no recorded expiry. */
+  certExpiry?: string;
+}
+
+/** Resume a blocked job once the field blocker has been resolved. */
+export interface UnblockJobInput {
+  jobId: string;
+  resolutionNote: string;
+}
+
+/** The four pieces of staff commissioning evidence, in the backend's exact wording. */
+export const STAFF_CHECKLIST = [
+  "Owner confirmed",
+  "Gateway linked",
+  "Functions mapped",
+  "Delivery test passed"
+] as const;
+
+export type ChecklistItem = (typeof STAFF_CHECKLIST)[number];
+
+export interface RecordChecklistItemInput {
+  jobId: string;
+  item: ChecklistItem;
+}
+
+/** What a job's own record adds to the list row: recorded evidence and field notes. */
+export interface JobDetail {
+  /** Checklist items recorded so far, by their exact wording. */
+  checklist: string[];
+  /** Installer field notes, newest first. */
+  notes: { text: string; recordedAt: string }[];
+}
+
+export type SiteLifecycleTarget = "active" | "decommissioned";
+
+export interface SetSiteLifecycleInput {
+  siteId: string;
+  status: SiteLifecycleTarget;
+  /** Kept for the audit trail; the backend takes no reason. */
+  reason: string;
+}
+
 export interface CreateIncidentInput {
   title: string;
   severity: Severity;
@@ -177,6 +263,27 @@ export interface LinkGatewayResult {
   device: Device;
 }
 
+export interface ChecklistRecord {
+  item: string;
+  recordedAt: string;
+}
+
+/** One inbox entry, already reduced to what the console shows. */
+export interface NotificationItem {
+  id: string;
+  title: string;
+  detail: string;
+  createdAt: string;
+  read: boolean;
+  /** Present when the notification is about an installation job. */
+  jobId?: string;
+}
+
+export interface NotificationList {
+  items: NotificationItem[];
+  unreadCount: number;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The interface                                                               */
 /* -------------------------------------------------------------------------- */
@@ -219,6 +326,29 @@ export interface OperationsApi {
   transitionInstaller(
     input: InstallerTransitionInput
   ): Promise<ApiResult<undefined>>;
+
+  createInstaller(input: CreateInstallerInput): Promise<ApiResult<{ installer: Installer }>>;
+
+  registerDevice(input: RegisterDeviceInput): Promise<ApiResult<{ device: Device }>>;
+
+  unblockJob(input: UnblockJobInput): Promise<ApiResult<{ job: Job }>>;
+
+  /** The job's recorded evidence and field notes. Rejects when the job cannot be read. */
+  getJobDetail(jobId: string): Promise<JobDetail>;
+
+  recordChecklistItem(
+    input: RecordChecklistItemInput
+  ): Promise<ApiResult<{ checklistItem: ChecklistRecord }>>;
+
+  setSiteLifecycle(input: SetSiteLifecycleInput): Promise<ApiResult<{ site: PlatformSite }>>;
+
+  /** The operator's inbox, newest first. Rejects when it cannot be read. */
+  listNotifications(): Promise<NotificationList>;
+
+  markNotificationRead(id: string): Promise<PlainResult>;
+
+  /** The badge number. Never rejects; an unreadable inbox reads as zero. */
+  unreadNotificationCount(): Promise<number>;
 
   createIncident(
     input: CreateIncidentInput

@@ -1,7 +1,9 @@
 # RanaAdmin (Network Operations) backend integration status
 
 _Assessed against the Rana54 staging API (`https://staging.api.rana54.com`,
-Swagger at `/api/docs`). Updated 2026-09-12 for the platform list handover._
+Swagger at `/api/docs`). Updated 2026-09-16 for installer onboarding, device
+registration, the staff checklist, job unblock, site lifecycle and the
+notification inbox._
 
 ## Summary
 
@@ -28,8 +30,13 @@ empties that one collection instead of failing the console.
 3. Rana54 can also provision a site directly from an enterprise record or the
    Enterprises page (**Provision site**, `POST /admin/sites`).
 4. A job is created against the approved request (`POST /jobs`), the gateway
-   is linked, and acceptance (`POST /jobs/{id}/acceptance`) makes the site
-   active.
+   is linked (the device must already be registered, **Devices > Register
+   device**, `POST /admin/sites/{siteId}/devices`), the four staff checklist
+   items are recorded from the job drawer (`POST /jobs/{id}/checklist`, the
+   fourth moves the job to ready for acceptance), and acceptance
+   (`POST /jobs/{id}/acceptance`) makes the site active.
+5. A site can also be activated or decommissioned directly from the enterprise
+   record (`PATCH /sites/{siteId}/lifecycle-status`).
 
 ## What the console needs vs. what the API provides
 
@@ -38,11 +45,24 @@ empties that one collection instead of failing the console.
   endpoints above.
 - **Staff / access** via `GET /admin/users` and the admin mutations
   (`POST /admin/users`, `.../invite`, `.../suspend`, `.../unsuspend`).
-- **Installer roster** via `GET /installers` and `POST /installers/{id}/transitions`.
+- **Installer roster** via `GET /installers`, `POST /installers` (**Field
+  Operations > Installers > Add installer**) and `POST /installers/{id}/transitions`.
+- **Devices** via `GET /devices` and `POST /admin/sites/{siteId}/devices`
+  (**Devices > Register device**; a duplicate serial is refused with 409).
 - **Workflow writes**: `POST /admin/organisations` + `POST /admin/users`
   (enterprise + first administrator, temp password shown once),
-  `POST /admin/sites`, `POST /site-requests/{id}/decision`, `POST /jobs`,
-  `/jobs/{id}/assignment`, `/gateway-link`, `/acceptance`.
+  `POST /admin/sites`, `PATCH /sites/{id}/lifecycle-status` (activate or
+  decommission from the enterprise record), `POST /site-requests/{id}/decision`,
+  `POST /jobs`, `/jobs/{id}/assignment`, `/gateway-link`,
+  `DELETE /jobs/{id}/devices/gateway`, `/jobs/{id}/unblock` (blocked jobs only,
+  409 `job_not_blocked`), `/jobs/{id}/checklist` (the four staff items, 409 on a
+  duplicate), `/acceptance`.
+- **Job record** via `GET /jobs/{id}`: the job drawer reads `checklistItems`
+  and `notes` when it opens, so the completion evidence and installer field
+  notes come from the backend rather than the list row.
+- **Notifications** via `GET /notifications`, `GET /notifications/unread-count`
+  (the bell badge, polled every 60 seconds while signed in) and
+  `POST /notifications/{id}/read`. Job-linked entries open the job drawer.
 
 ### Still missing on the backend
 | Console area | Needs | Exists today? |
@@ -53,22 +73,24 @@ empties that one collection instead of failing the console.
 | Platform staff roles | Field Operations / Data Operations / Support Analyst | No, `Admin` only |
 | Device diagnostics, firmware, heartbeat | per-device telemetry | No (only certification state and interval) |
 | Enterprise region / products / first admin name | fields on the organisation | No, remembered in this browser only |
-| Job checklist on the list | `checklistItems` on `GET /jobs` rows | No, only on `GET /jobs/{id}` |
+| Job checklist on the list | `checklistItems` on `GET /jobs` rows | No, only on `GET /jobs/{id}` (the drawer reads it there) |
+| Staff grants UI | `POST /admin/users/{id}/grants` and `DELETE .../grants/{grantId}` | Endpoints exist; no console UI built yet |
+| Site lifecycle reason | a `reason` on `PATCH /sites/{id}/lifecycle-status` | No, the console's reason is confirmation-only |
 
 ### Contract-shape mismatches (fix when wiring, once lists exist)
 The prototype's `http-adapter` assumes a contract that differs from the real API:
-- **Mutation envelope** — prototype expects `{ snapshot, data }` from every
+- **Mutation envelope**: prototype expects `{ snapshot, data }` from every
   write; the API returns only the changed entity, no snapshot.
-- **Site decision** — prototype sends `decision: "Approved" | "Returned"`; the
+- **Site decision**: prototype sends `decision: "Approved" | "Returned"`; the
   API expects lowercase `"approved" | "returned"`.
-- **Installer transition** — prototype sends `"Suspend" | "Restore"`; the API
+- **Installer transition**: prototype sends `"Suspend" | "Restore"`; the API
   expects `"Suspend" | "Reactivate"`.
-- **Job create** — prototype sends `{ date, time, note }`; the API expects
+- **Job create**: prototype sends `{ date, time, note }`; the API expects
   `{ requestId, installerId, scheduledAt, note }`.
-- **Gateway link** — prototype expects `{ device }` back; the API returns
+- **Gateway link**: prototype expects `{ device }` back; the API returns
   `{ job }` (and may flip the job to `blocked` with a `duplicate_gateway_identity`
   conflict).
-- **Job blockers** — the API's `job.blockers` is `JobBlocker[]`
+- **Job blockers**: the API's `job.blockers` is `JobBlocker[]`
   (`{ reason, note, blockedBy, blockedAt }`), not `string[]`.
 
 ## Recommendation
