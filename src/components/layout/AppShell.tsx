@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { clearSession, hasSession } from "@/lib/api/session";
 
@@ -11,7 +11,7 @@ import { GlobalSearch } from "@/components/layout/GlobalSearch";
 import { OverlayHost } from "@/components/layout/OverlayHost";
 import { Icon } from "@/components/ui/Icon";
 import { ToastRegion } from "@/components/ui/ToastRegion";
-import { IS_PROTOTYPE_DATA } from "@/lib/api";
+import { api, IS_PROTOTYPE_DATA } from "@/lib/api";
 import { useWorkspace } from "@/providers/workspace-provider";
 import type { Snapshot } from "@/lib/types";
 
@@ -83,11 +83,15 @@ function Brand() {
  * the single overlay host. Held back until the operational snapshot has loaded
  * so no view ever renders against a partial picture.
  */
+/** How often the bell re-reads the unread count while the workspace is open. */
+const UNREAD_POLL_MS = 60000;
+
 export function AppShell({ children }: { children: ReactNode }) {
-  const { snapshot, loading, loadError, reload, openOverlay, navOpen, setNavOpen } =
+  const { snapshot, loading, loadError, reload, overlay, openOverlay, navOpen, setNavOpen } =
     useWorkspace();
   const pathname = usePathname();
   const router = useRouter();
+  const [unread, setUnread] = useState(0);
 
   /* Live mode requires a signed-in operator; demo mode has no sign-in. */
   const live = !IS_PROTOTYPE_DATA;
@@ -95,6 +99,31 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!signedIn) router.replace("/login");
   }, [signedIn, router]);
+
+  /*
+   * The bell badge: read on mount, once a minute, and whenever the inbox
+   * drawer opens or closes (marking items read changes the count). Only a
+   * signed-in operator with a loaded picture polls.
+   */
+  const ready = signedIn && Boolean(snapshot);
+  const inboxOpen = overlay?.kind === "notifications";
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    const poll = () =>
+      api
+        .unreadNotificationCount()
+        .then(count => {
+          if (!cancelled) setUnread(count);
+        })
+        .catch(() => undefined);
+    void poll();
+    const timer = window.setInterval(poll, UNREAD_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [ready, inboxOpen]);
 
   function signOut() {
     const base = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api").replace(/\/$/, "");
@@ -129,7 +158,6 @@ export function AppShell({ children }: { children: ReactNode }) {
   }
 
   const items = navItems(snapshot);
-  const openIncidents = snapshot.incidents.filter(item => item.status === "Open").length;
 
   return (
     <>
@@ -212,11 +240,13 @@ export function AppShell({ children }: { children: ReactNode }) {
             <button
               className="icon-button"
               type="button"
-              aria-label="Notifications"
+              aria-label={unread ? `Notifications, ${unread} unread` : "Notifications"}
               onClick={() => openOverlay({ kind: "notifications" })}
             >
               <Icon name="bell" />
-              <span className="notification-count">{openIncidents}</span>
+              {unread ? (
+                <span className="notification-badge">{unread > 99 ? "99+" : unread}</span>
+              ) : null}
             </button>
           </header>
           {children}

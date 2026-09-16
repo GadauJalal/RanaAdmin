@@ -34,6 +34,10 @@ export type Overlay =
   | { kind: "new-enterprise" }
   | { kind: "new-site"; enterpriseId?: string }
   | { kind: "new-job" }
+  | { kind: "new-installer" }
+  | { kind: "register-device"; siteId?: string }
+  | { kind: "unblock-job"; id: string }
+  | { kind: "site-lifecycle"; id: string; status: "active" | "decommissioned" }
   | { kind: "new-incident" }
   | { kind: "invite-staff" }
   | { kind: "support-grant"; enterpriseId?: string }

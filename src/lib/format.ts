@@ -49,7 +49,8 @@ export function chipTone(value: string): ChipTone {
     "available",
     "passing",
     "resolved",
-    "accepted"
+    "accepted",
+    "recorded"
   ];
   const amber = [
     "pending",

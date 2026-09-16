@@ -48,13 +48,23 @@ export function FieldView() {
         title="Field Operations"
         description="Move approved sites through assignment, commissioning evidence, and final acceptance without bypassing safety controls."
         actions={
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => openOverlay({ kind: "new-job" })}
-          >
-            <Icon name="plus" /> Create job
-          </button>
+          tab === "installers" ? (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => openOverlay({ kind: "new-installer" })}
+            >
+              <Icon name="plus" /> Add installer
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => openOverlay({ kind: "new-job" })}
+            >
+              <Icon name="plus" /> Create job
+            </button>
+          )
         }
       />
 

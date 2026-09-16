@@ -12,8 +12,10 @@
  *
  * Writes call the real workflow endpoints: create an enterprise and provision
  * its first administrator (whose one-time temporary password is surfaced once
- * and never persisted), provision a site, decide a site request, create,
- * reassign, link and accept jobs, and suspend or restore staff and installers.
+ * and never persisted), provision a site and move it through its lifecycle,
+ * register a device, decide a site request, onboard installers, create,
+ * reassign, link, unblock, evidence and accept jobs, suspend or restore staff
+ * and installers, and read or clear the operator's notification inbox.
  * Operations the backend does not model yet (incidents, enterprise suspension,
  * support grants, diagnostics) are refused with a plain message.
  *
@@ -42,6 +44,7 @@ import {
   type ApiResult,
   type CreateEnterpriseInput,
   type CreateIncidentInput,
+  type CreateInstallerInput,
   type CreateJobInput,
   type CreateSiteInput,
   type CreateSupportGrantInput,
@@ -51,13 +54,20 @@ import {
   type IncidentTransitionInput,
   type InstallerTransitionInput,
   type InviteStaffInput,
+  type JobDetail,
   type LinkGatewayInput,
   type LinkGatewayResult,
+  type NotificationItem,
+  type NotificationList,
   type OperationsApi,
   type ReassignJobInput,
+  type RecordChecklistItemInput,
+  type RegisterDeviceInput,
   type ReissueAdminInviteInput,
+  type SetSiteLifecycleInput,
   type SiteDecisionInput,
   type StaffTransitionInput,
+  type UnblockJobInput,
   type UnlinkGatewayInput
 } from "./contract";
 import { clearSession, getAccessToken, getRefreshToken, redirectToLogin, setTokens } from "./session";
@@ -172,6 +182,39 @@ interface BackendJob {
   blockers: { reason: string; note?: string | null }[];
 }
 
+interface BackendChecklistItem {
+  item: string;
+  recordedAt: string;
+  recordedBy: string;
+}
+
+interface BackendJobNote {
+  text: string;
+  recordedAt: string;
+  recordedBy: string;
+}
+
+/** GET /jobs/{id}: the row plus its recorded evidence and field notes. */
+interface BackendJobDetail {
+  job: BackendJob;
+  checklistItems?: BackendChecklistItem[];
+  notes?: BackendJobNote[];
+}
+
+interface BackendNotification {
+  id: string;
+  type: string;
+  payload: Record<string, unknown> | null;
+  createdAt: string;
+  readAt: string | null;
+}
+
+interface BackendNotificationList {
+  notifications: BackendNotification[];
+  total: number;
+  unreadCount: number;
+}
+
 interface BackendHealth {
   status: string;
   info?: Record<string, { status: string }>;
@@ -278,6 +321,10 @@ function post<T>(path: string, payload?: unknown) {
   return request<T>(path, { method: "POST", body: payload === undefined ? undefined : JSON.stringify(payload) });
 }
 
+function patch<T>(path: string, payload: unknown) {
+  return request<T>(path, { method: "PATCH", body: JSON.stringify(payload) });
+}
+
 function del<T>(path: string) {
   return request<T>(path, { method: "DELETE" });
 }
@@ -288,7 +335,8 @@ function toFailure(outcome: { status: number; code: string; message: string }, s
     "site_not_approved",
     "duplicate_gateway_identity",
     "installer_has_active_jobs",
-    "job_not_ready_for_acceptance"
+    "job_not_ready_for_acceptance",
+    "job_not_blocked"
   ];
   const text = `${outcome.code} ${outcome.message}`;
   const matched = known.find(code => text.includes(code));
@@ -609,6 +657,43 @@ function mapAudit(entry: BackendAuditEntry): AuditEvent {
   };
 }
 
+const NOTIFICATION_TYPES: Record<string, string> = {
+  AccountSuspended: "Account suspended",
+  AccountReinstated: "Account reinstated",
+  GrantIssued: "Access grant issued",
+  GrantRevoked: "Access grant revoked",
+  JobBlocked: "Job blocked",
+  JobReadyForAcceptance: "Job ready for acceptance",
+  JobCompleted: "Job completed"
+};
+
+/** "JobReadyForAcceptance" reads as "Job ready for acceptance". */
+function notificationKind(type: string): string {
+  return NOTIFICATION_TYPES[type] ?? capitalise(type.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase());
+}
+
+/**
+ * Reduce a notification to what the inbox shows. Job and grant notifications
+ * carry a ready-to-render in-app message; the account pair only renders an
+ * email, so its subject stands in for the title.
+ */
+function mapNotification(item: BackendNotification): NotificationItem {
+  const payload = item.payload ?? {};
+  const inApp = payload.inApp as { message?: unknown } | undefined;
+  const email = payload.email as { subject?: unknown } | undefined;
+  const message = typeof inApp?.message === "string" ? inApp.message : "";
+  const subject = typeof email?.subject === "string" ? email.subject : "";
+  const kind = notificationKind(item.type);
+  return {
+    id: item.id,
+    title: message || subject || kind,
+    detail: kind,
+    createdAt: when(item.createdAt),
+    read: Boolean(item.readAt),
+    ...(typeof payload.jobId === "string" && payload.jobId ? { jobId: payload.jobId } : null)
+  };
+}
+
 function mapHealth(health: BackendHealth | null): PlatformService[] {
   if (!health) {
     return [
@@ -926,6 +1011,175 @@ export const httpAdapter: OperationsApi = {
     });
     if (!result.ok) return toFailure(result);
     return ok(undefined);
+  },
+
+  /**
+   * Onboard an installer (POST /installers). The backend creates a pending
+   * user account and emails the activation link; the roster entry is returned.
+   */
+  async createInstaller(input: CreateInstallerInput) {
+    const result = await post<BackendInstaller | { installer: BackendInstaller }>("/installers", {
+      email: input.email.trim(),
+      fullName: input.fullName.trim(),
+      name: input.name.trim(),
+      phone: input.phone.trim(),
+      region: input.region,
+      certStatus: input.certStatus,
+      certExpiry: input.certExpiry || undefined
+    });
+    if (!result.ok) return toFailure(result);
+
+    const body = result.body as { installer?: BackendInstaller } & Partial<BackendInstaller>;
+    const created = body.installer ?? (body as BackendInstaller);
+    const snapshot = await buildSnapshot();
+    const installer =
+      snapshot.installers.find(item => item.id === created.id) ??
+      mapInstaller(
+        {
+          id: created.id ?? "",
+          userId: created.userId ?? "",
+          name: created.name ?? input.name.trim(),
+          region: created.region ?? input.region,
+          certStatus: created.certStatus ?? input.certStatus,
+          certExpiry: created.certExpiry ?? input.certExpiry ?? null,
+          phone: created.phone ?? input.phone.trim(),
+          status: created.status ?? "available"
+        },
+        []
+      );
+    return { ok: true, snapshot, data: { installer } };
+  },
+
+  /**
+   * Register a metering device on a site (POST /admin/sites/{id}/devices).
+   * A duplicate serial is refused by the backend with 409.
+   */
+  async registerDevice(input: RegisterDeviceInput) {
+    const result = await post<BackendDevice | { device: BackendDevice }>(
+      `/admin/sites/${encodeURIComponent(input.siteId)}/devices`,
+      {
+        serialNumber: input.serialNumber.trim(),
+        role: input.role,
+        transmissionIntervalS: input.transmissionIntervalS,
+        certStatus: input.certStatus,
+        certExpiry: input.certExpiry || undefined
+      }
+    );
+    if (!result.ok) return toFailure(result);
+
+    const body = result.body as { device?: BackendDevice } & Partial<BackendDevice>;
+    const created = body.device ?? (body as BackendDevice);
+    const snapshot = await buildSnapshot();
+    const device =
+      snapshot.devices.find(item => item.id === created.id) ??
+      mapDevice(
+        {
+          id: created.id ?? "",
+          siteId: created.siteId ?? input.siteId,
+          serialNumber: created.serialNumber ?? input.serialNumber.trim(),
+          role: created.role ?? input.role,
+          transmissionIntervalS: created.transmissionIntervalS ?? input.transmissionIntervalS,
+          certStatus: created.certStatus ?? input.certStatus,
+          certExpiry: created.certExpiry ?? input.certExpiry ?? null
+        },
+        { enterprises: [], sites: [], installers: [], siteRequests: [] },
+        []
+      );
+    return { ok: true, snapshot, data: { device } };
+  },
+
+  /** Resume a blocked job (POST /jobs/{id}/unblock). Only a blocked job can be resumed. */
+  async unblockJob({ jobId, resolutionNote }: UnblockJobInput) {
+    const result = await post<{ job: BackendJob }>(`/jobs/${encodeURIComponent(jobId)}/unblock`, {
+      resolutionNote: resolutionNote.trim() || undefined
+    });
+    if (!result.ok) return toFailure(result);
+    const snapshot = await buildSnapshot();
+    return { ok: true, snapshot, data: { job: jobFromSnapshot(snapshot, result.body.job) } };
+  },
+
+  /** Recorded evidence and field notes come only from the job's own record. */
+  async getJobDetail(jobId: string): Promise<JobDetail> {
+    const result = await request<BackendJobDetail>(`/jobs/${encodeURIComponent(jobId)}`);
+    if (!result.ok) throw new Error(result.message);
+    return {
+      checklist: (result.body.checklistItems ?? []).map(item => item.item),
+      notes: (result.body.notes ?? []).map(note => ({
+        text: note.text,
+        recordedAt: when(note.recordedAt)
+      }))
+    };
+  },
+
+  /**
+   * Record one piece of staff commissioning evidence (POST /jobs/{id}/checklist).
+   * Append-only; the fourth item moves the job to ready for acceptance.
+   */
+  async recordChecklistItem({ jobId, item }: RecordChecklistItemInput) {
+    const result = await post<{ checklistItem: BackendChecklistItem }>(
+      `/jobs/${encodeURIComponent(jobId)}/checklist`,
+      { item }
+    );
+    if (!result.ok) return toFailure(result);
+    const recorded = result.body.checklistItem;
+    return ok({ checklistItem: { item: recorded?.item ?? item, recordedAt: when(recorded?.recordedAt) } });
+  },
+
+  /**
+   * Move a site through its lifecycle (PATCH /sites/{id}/lifecycle-status).
+   * The backend takes no reason; the one collected is for the operator's
+   * confirmation only. An illegal transition is refused with 409.
+   */
+  async setSiteLifecycle({ siteId, status }: SetSiteLifecycleInput) {
+    const result = await patch<BackendSite | { site: BackendSite }>(
+      `/sites/${encodeURIComponent(siteId)}/lifecycle-status`,
+      { status }
+    );
+    if (!result.ok) return toFailure(result);
+
+    const body = result.body as { site?: BackendSite } & Partial<BackendSite>;
+    const updated = body.site ?? (body as BackendSite);
+    const snapshot = await buildSnapshot();
+    const site =
+      snapshot.sites.find(item => item.id === siteId) ??
+      ({
+        id: siteId,
+        name: updated.name ?? siteId,
+        enterpriseId: updated.organisationId ?? "",
+        enterprise:
+          snapshot.enterprises.find(item => item.id === updated.organisationId)?.name ??
+          updated.organisationId ??
+          "",
+        region: regionLabel(updated.region),
+        status: SITE_STATUS[updated.lifecycleStatus ?? status] ?? capitalise(status),
+        created: when(updated.createdAt)
+      } satisfies PlatformSite);
+    return { ok: true, snapshot, data: { site } };
+  },
+
+  async listNotifications(): Promise<NotificationList> {
+    const result = await request<BackendNotificationList>("/notifications?limit=50");
+    if (!result.ok) throw new Error(result.message);
+    const rows = asList<BackendNotification>(result, "notifications");
+    return {
+      items: rows.map(mapNotification),
+      unreadCount:
+        typeof result.body?.unreadCount === "number"
+          ? result.body.unreadCount
+          : rows.filter(item => !item.readAt).length
+    };
+  },
+
+  /** POST /notifications/{id}/read answers 204; nothing else in the picture changes. */
+  async markNotificationRead(id: string) {
+    const result = await post<void>(`/notifications/${encodeURIComponent(id)}/read`);
+    if (!result.ok) return toFailure(result);
+    return { ok: true as const };
+  },
+
+  async unreadNotificationCount() {
+    const result = await request<{ unreadCount?: number }>("/notifications/unread-count");
+    return result.ok && typeof result.body?.unreadCount === "number" ? result.body.unreadCount : 0;
   },
 
   createIncident(_input: CreateIncidentInput) {

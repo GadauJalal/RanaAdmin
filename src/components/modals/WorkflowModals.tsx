@@ -4,7 +4,13 @@ import { useRouter } from "next/navigation";
 
 import { FormModal, Modal, ReasonModal } from "@/components/ui/Overlay";
 import { EmptyState, Notice } from "@/components/ui/primitives";
-import { api } from "@/lib/api";
+import {
+  api,
+  NIGERIAN_REGIONS,
+  type DeviceCertStatus,
+  type DeviceRole,
+  type InstallerCertStatus
+} from "@/lib/api";
 import { pastTense } from "@/lib/format";
 import type { Severity } from "@/lib/types";
 import { useSnapshot, useWorkspace } from "@/providers/workspace-provider";
@@ -259,6 +265,165 @@ export function NewSiteModal({ enterpriseId }: { enterpriseId?: string }) {
           The site starts as provisioned. Readings arrive only after a gateway is linked inside an
           installation job and the installation is accepted.
         </Notice>
+      </div>
+    </FormModal>
+  );
+}
+
+/**
+ * Move a site between lifecycle states. Activation normally happens when an
+ * installation is accepted; this is the direct path for sites commissioned
+ * outside a job, and the only way to retire one.
+ */
+export function SiteLifecycleModal({
+  id,
+  status
+}: {
+  id: string;
+  status: "active" | "decommissioned";
+}) {
+  const snapshot = useSnapshot();
+  const { run, openOverlay } = useWorkspace();
+  const site = snapshot.sites.find(item => item.id === id);
+  if (!site) return null;
+
+  const retiring = status === "decommissioned";
+  const verb = retiring ? "Decommission" : "Activate";
+
+  return (
+    <ReasonModal
+      title={`${verb} site`}
+      description={`${site.name} · ${site.id} · ${site.status}`}
+      formId="site-lifecycle-form"
+      submitLabel={`Confirm ${verb.toLowerCase()}`}
+      submitTone={retiring ? "btn-danger" : "btn-primary"}
+      placeholder={
+        retiring
+          ? "Why this site is being retired (for example the contract ended)"
+          : "Why this site is going live without a job acceptance"
+      }
+      notice={
+        <Notice icon="shield" tone={retiring ? "danger" : undefined}>
+          {retiring
+            ? "A decommissioned site keeps its identity, devices and readings history, and cannot be reactivated."
+            : "An active site is treated as live: readings are expected and freshness is monitored."}
+        </Notice>
+      }
+      onSubmit={reason =>
+        void run(() => api.setSiteLifecycle({ siteId: id, status, reason }), {
+          failureTitle: `Site not ${retiring ? "decommissioned" : "activated"}`,
+          success: ({ site: updated }) => ({
+            title: `Site ${retiring ? "decommissioned" : "activated"}`,
+            detail: `${updated.name} is now ${String(updated.status).toLowerCase()}.`
+          }),
+          onSuccess: ({ site: updated }) =>
+            openOverlay({ kind: "enterprise", id: updated.enterpriseId })
+        })
+      }
+    />
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Devices                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Register a metering device on a site. Registration records identity and
+ * certification only; the device joins a job through gateway linking.
+ */
+export function RegisterDeviceModal({ siteId }: { siteId?: string }) {
+  const snapshot = useSnapshot();
+  const { run, openOverlay } = useWorkspace();
+  const sites = snapshot.sites.filter(item => item.status !== "Decommissioned");
+
+  return (
+    <FormModal
+      title="Register device"
+      description="Record a metering device's identity and certification against a site."
+      formId="register-device-form"
+      submitLabel="Register device"
+      submitIcon="plus"
+      onSubmit={data =>
+        void run(
+          () =>
+            api.registerDevice({
+              siteId: text(data, "siteId"),
+              serialNumber: text(data, "serialNumber"),
+              role: text(data, "role") as DeviceRole,
+              transmissionIntervalS: Number(text(data, "transmissionIntervalS")) || 60,
+              certStatus: text(data, "certStatus") as DeviceCertStatus,
+              certExpiry: text(data, "certExpiry") || undefined
+            }),
+          {
+            failureTitle: "Device could not be registered",
+            success: ({ device }) => ({
+              title: "Device registered",
+              detail: `${device.serial} is registered at ${device.site}. It can now be linked inside an installation job.`
+            }),
+            onSuccess: ({ device }) => openOverlay({ kind: "device", id: device.id })
+          }
+        )
+      }
+    >
+      <Notice icon="shield">
+        Linking a gateway to a job requires a registered device with this exact serial. The
+        serial is checked for duplicates; registration never creates readings.
+      </Notice>
+      <div className="field full">
+        <label htmlFor="device-site">Site</label>
+        <select id="device-site" name="siteId" required defaultValue={siteId ?? ""}>
+          <option value="">Select site</option>
+          {sites.map(item => (
+            <option key={item.id} value={item.id}>
+              {item.name} · {item.enterprise}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="field full">
+        <label htmlFor="device-serial">Serial number</label>
+        <input
+          id="device-serial"
+          name="serialNumber"
+          required
+          minLength={4}
+          maxLength={120}
+          placeholder="R54G-00A0-0000"
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="device-role">Role</label>
+        <select id="device-role" name="role" required defaultValue="grid">
+          <option value="grid">Grid meter</option>
+          <option value="inverter_output">Inverter output meter</option>
+        </select>
+      </div>
+      <div className="field">
+        <label htmlFor="device-interval">Transmission interval (seconds)</label>
+        <input
+          id="device-interval"
+          name="transmissionIntervalS"
+          type="number"
+          required
+          min={1}
+          max={86400}
+          defaultValue={60}
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="device-cert-status">Certification</label>
+        <select id="device-cert-status" name="certStatus" required defaultValue="certified">
+          <option value="certified">Certified</option>
+          <option value="pending">Pending certification</option>
+          <option value="expired">Certificate expired</option>
+          <option value="uncertified">Uncertified</option>
+        </select>
+      </div>
+      <div className="field">
+        <label htmlFor="device-cert-expiry">Certificate expiry</label>
+        <input id="device-cert-expiry" name="certExpiry" type="date" />
+        <small>Optional. Leave blank when the certificate has no recorded expiry.</small>
       </div>
     </FormModal>
   );
@@ -579,6 +744,42 @@ export function UnlinkGatewayModal({ id }: { id: string }) {
   );
 }
 
+/** Resume a blocked job once the field blocker has been dealt with. */
+export function UnblockJobModal({ id }: { id: string }) {
+  const snapshot = useSnapshot();
+  const { run, openOverlay } = useWorkspace();
+  const job = snapshot.jobs.find(item => item.id === id);
+  if (!job) return null;
+
+  return (
+    <ReasonModal
+      title="Unblock job"
+      description={`${job.site} · ${job.id}`}
+      formId="unblock-job-form"
+      submitLabel="Resume job"
+      label="Resolution note"
+      placeholder="How the blocker was resolved (for example the correct homeowner was reached)"
+      notice={
+        <Notice icon="shield" tone="warning">
+          {job.blockers.length ? `${job.blockers.join(" ")} ` : ""}
+          The job resumes in progress when a gateway is linked, otherwise as scheduled. The
+          blocker history stays in the audit trail.
+        </Notice>
+      }
+      onSubmit={reason =>
+        void run(() => api.unblockJob({ jobId: id, resolutionNote: reason }), {
+          failureTitle: "Job could not be unblocked",
+          success: ({ job: updated }) => ({
+            title: "Job unblocked",
+            detail: `${updated.id} is back to ${String(updated.status).toLowerCase()}.`
+          }),
+          onSuccess: ({ job: updated }) => openOverlay({ kind: "job", id: updated.id })
+        })
+      }
+    />
+  );
+}
+
 export function AcceptInstallationModal({ id }: { id: string }) {
   const snapshot = useSnapshot();
   const { run } = useWorkspace();
@@ -623,6 +824,103 @@ export function AcceptInstallationModal({ id }: { id: string }) {
             <small>The accepted record becomes append-only operational history.</small>
           </span>
         </label>
+      </div>
+    </FormModal>
+  );
+}
+
+/**
+ * Onboard an installer. The platform creates their pending account and sends
+ * the activation link; job access is granted per assignment, not here.
+ */
+export function NewInstallerModal() {
+  const { run, openOverlay } = useWorkspace();
+
+  return (
+    <FormModal
+      title="Add installer"
+      description="Create the installer's account and roster entry. They activate by email."
+      formId="installer-form"
+      submitLabel="Add installer"
+      submitIcon="plus"
+      onSubmit={data => {
+        const fullName = text(data, "fullName");
+        void run(
+          () =>
+            api.createInstaller({
+              email: text(data, "email"),
+              fullName,
+              name: fullName,
+              phone: text(data, "phone"),
+              region: text(data, "region"),
+              certStatus: text(data, "certStatus") as InstallerCertStatus,
+              certExpiry: text(data, "certExpiry") || undefined
+            }),
+          {
+            failureTitle: "Installer could not be added",
+            success: ({ installer }) => ({
+              title: "Installer added",
+              detail: `${installer.name} is on the roster and can be assigned to jobs once activated.`
+            }),
+            onSuccess: ({ installer }) => openOverlay({ kind: "installer", id: installer.id })
+          }
+        );
+      }}
+    >
+      <div className="field">
+        <label htmlFor="installer-name">Full name</label>
+        <input id="installer-name" name="fullName" required maxLength={120} placeholder="Full name" />
+      </div>
+      <div className="field">
+        <label htmlFor="installer-email">Email</label>
+        <input
+          id="installer-email"
+          name="email"
+          type="email"
+          required
+          placeholder="name@installer.example"
+        />
+        <small>The activation link is sent here.</small>
+      </div>
+      <div className="field">
+        <label htmlFor="installer-phone">Phone</label>
+        <input
+          id="installer-phone"
+          name="phone"
+          type="tel"
+          required
+          placeholder="+234 800 000 0000"
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="installer-region">Region</label>
+        <select id="installer-region" name="region" required defaultValue="">
+          <option value="">Select region</option>
+          {NIGERIAN_REGIONS.map(item => (
+            <option key={item.value} value={item.value}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="field">
+        <label htmlFor="installer-cert-status">Certification</label>
+        <select id="installer-cert-status" name="certStatus" required defaultValue="current">
+          <option value="current">Current</option>
+          <option value="expiring">Expiring</option>
+          <option value="expired">Expired</option>
+        </select>
+      </div>
+      <div className="field">
+        <label htmlFor="installer-cert-expiry">Certificate expiry</label>
+        <input id="installer-cert-expiry" name="certExpiry" type="date" />
+        <small>Optional.</small>
+      </div>
+      <div className="field full">
+        <Notice icon="shield">
+          Installers see only the jobs assigned to them. No site or organisation access is
+          granted at onboarding.
+        </Notice>
       </div>
     </FormModal>
   );

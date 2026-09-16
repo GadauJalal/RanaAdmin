@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 
 import {
   DetailGrid,
@@ -14,7 +14,14 @@ import {
 import { Icon } from "@/components/ui/Icon";
 import { Drawer } from "@/components/ui/Overlay";
 import { Chip, EmptyState, Notice, Progress, Severity } from "@/components/ui/primitives";
-import { api } from "@/lib/api";
+import {
+  api,
+  STAFF_CHECKLIST,
+  type ChecklistItem,
+  type JobDetail,
+  type NotificationItem,
+  type NotificationList
+} from "@/lib/api";
 import { pluralise } from "@/lib/format";
 import { useSnapshot, useWorkspace } from "@/providers/workspace-provider";
 
@@ -155,14 +162,48 @@ export function EnterpriseDrawer({ id }: { id: string }) {
       >
         {sites.length ? (
           <FunctionList>
-            {sites.map(site => (
-              <FunctionRow
-                key={site.id}
-                title={site.name}
-                meta={`${site.id} · ${site.region} · Created ${site.created}`}
-                trailing={<Chip>{site.status}</Chip>}
-              />
-            ))}
+            {sites.map(site => {
+              const provisioned = site.status === "Provisioned";
+              const retirable = provisioned || site.status === "Active";
+              return (
+                <FunctionRow
+                  key={site.id}
+                  title={site.name}
+                  meta={`${site.id} · ${site.region} · Created ${site.created}`}
+                  trailing={
+                    <span className="function-row-actions">
+                      <Chip>{site.status}</Chip>
+                      {provisioned ? (
+                        <button
+                          type="button"
+                          className="link-button"
+                          onClick={() =>
+                            openOverlay({ kind: "site-lifecycle", id: site.id, status: "active" })
+                          }
+                        >
+                          Activate
+                        </button>
+                      ) : null}
+                      {retirable ? (
+                        <button
+                          type="button"
+                          className="link-button"
+                          onClick={() =>
+                            openOverlay({
+                              kind: "site-lifecycle",
+                              id: site.id,
+                              status: "decommissioned"
+                            })
+                          }
+                        >
+                          Decommission
+                        </button>
+                      ) : null}
+                    </span>
+                  }
+                />
+              );
+            })}
           </FunctionList>
         ) : (
           <EmptyState
@@ -286,29 +327,91 @@ export function SiteRequestDrawer({ id }: { id: string }) {
 
 export function JobDrawer({ id }: { id: string }) {
   const snapshot = useSnapshot();
-  const { openOverlay } = useWorkspace();
+  const { openOverlay, run } = useWorkspace();
   const job = snapshot.jobs.find(record => record.id === id);
+
+  /*
+   * Recorded evidence and field notes live on the job's own record, not the
+   * list row, so they are read when the drawer opens and again after every
+   * item recorded here. Until they arrive the list row's checklist stands in.
+   */
+  const [detail, setDetail] = useState<JobDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setDetailError(null);
+    api
+      .getJobDetail(id)
+      .then(loaded => {
+        if (!cancelled) setDetail(loaded);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setDetailError(
+            error instanceof Error ? error.message : "The job's evidence could not be loaded."
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, version]);
+
   if (!job) return <MissingRecord label="installation job" />;
 
   const request = snapshot.siteRequests.find(item => item.id === job.siteRequestId);
   const linked = snapshot.devices.find(item => item.id === job.linkedDevice);
   const approved = request?.status === "Approved";
+  const completed = job.status === "Completed";
+  const blocked = job.status === "Blocked";
   const canAccept = job.status === "Ready for acceptance";
-  const canLink = approved && !job.linkedDevice && job.status !== "Completed";
+  const canLink = approved && !job.linkedDevice && !completed;
   const canUnlink = Boolean(job.linkedDevice) && job.status === "In progress";
+
+  const recordedItems = detail ? detail.checklist : job.checklist;
+  const recorded = STAFF_CHECKLIST.filter(item => recordedItems.includes(item));
+  const progress = detail ? recorded.length * (100 / STAFF_CHECKLIST.length) : job.progress;
+  const history = recordedItems.filter(
+    step => !(STAFF_CHECKLIST as readonly string[]).includes(step)
+  );
+
+  function recordItem(item: ChecklistItem) {
+    void run(() => api.recordChecklistItem({ jobId: id, item }), {
+      failureTitle: "Evidence could not be recorded",
+      keepOverlay: true,
+      success: ({ checklistItem }) => ({
+        title: `${checklistItem.item} recorded`,
+        detail:
+          recorded.length + 1 >= STAFF_CHECKLIST.length
+            ? "All four staff items are recorded. The job is ready for acceptance."
+            : `${recorded.length + 1} of ${STAFF_CHECKLIST.length} staff items recorded for ${job?.id}.`
+      }),
+      onSuccess: () => setVersion(value => value + 1)
+    });
+  }
 
   return (
     <Drawer
       title={job.site}
       footer={
         <>
-          {job.status !== "Completed" ? (
+          {!completed ? (
             <button
               type="button"
               className="btn btn-secondary"
               onClick={() => openOverlay({ kind: "reassign-job", id: job.id })}
             >
               Reassign installer
+            </button>
+          ) : null}
+          {blocked ? (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => openOverlay({ kind: "unblock-job", id: job.id })}
+            >
+              <Icon name="refresh" /> Unblock job
             </button>
           ) : null}
           {canAccept ? (
@@ -351,17 +454,73 @@ export function JobDrawer({ id }: { id: string }) {
         ]}
       />
 
-      <DetailSection title="Completion evidence" action={<span>{job.progress}%</span>}>
-        <Progress value={job.progress} />
+      <DetailSection title="Completion evidence" action={<span>{Math.round(progress)}%</span>}>
+        <Progress value={progress} />
+        {detailError ? (
+          <div style={{ marginTop: 14 }}>
+            <Notice icon="incident" tone="warning">
+              Recorded evidence could not be loaded from the job record: {detailError}
+            </Notice>
+          </div>
+        ) : null}
         <div style={{ marginTop: 18 }}>
+          <FunctionList>
+            {STAFF_CHECKLIST.map(item => {
+              const done = recorded.includes(item);
+              return (
+                <FunctionRow
+                  key={item}
+                  title={item}
+                  meta={
+                    done
+                      ? `Recorded against ${job.id}. Evidence is append-only.`
+                      : completed
+                        ? "Not recorded before acceptance."
+                        : "Staff evidence, recorded once the check is confirmed."
+                  }
+                  trailing={
+                    done ? (
+                      <Chip>Recorded</Chip>
+                    ) : completed ? (
+                      <Chip>Pending</Chip>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-small btn-secondary"
+                        disabled={!detail && !detailError}
+                        onClick={() => recordItem(item)}
+                      >
+                        <Icon name="check" /> Record
+                      </button>
+                    )
+                  }
+                />
+              );
+            })}
+          </FunctionList>
+        </div>
+        {history.length ? (
+          <div style={{ marginTop: 18 }}>
+            <Timeline
+              items={history.map(step => ({
+                title: step,
+                meta: `Recorded against ${job.id}`
+              }))}
+            />
+          </div>
+        ) : null}
+      </DetailSection>
+
+      {detail?.notes.length ? (
+        <DetailSection title="Field notes">
           <Timeline
-            items={job.checklist.map(step => ({
-              title: step,
-              meta: `Recorded against ${job.id}`
+            items={detail.notes.map(note => ({
+              title: note.text,
+              meta: `Installer note · ${note.recordedAt}`
             }))}
           />
-        </div>
-      </DetailSection>
+        </DetailSection>
+      ) : null}
 
       <DetailSection
         title="Linked gateway"
@@ -789,65 +948,159 @@ export function StaffDrawer({ id }: { id: string }) {
 
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The operator's inbox. Entries are read from the platform when the drawer
+ * opens; a job-linked entry opens its job (and is marked read on the way),
+ * anything else can be marked read in place.
+ */
 export function NotificationsDrawer() {
   const snapshot = useSnapshot();
-  const { openOverlay, closeOverlay } = useWorkspace();
-  const router = useRouter();
-  const items = snapshot.incidents.filter(item => item.status === "Open").slice(0, 5);
+  const { openOverlay, pushToast } = useWorkspace();
+  const [list, setList] = useState<NotificationList | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    api
+      .listNotifications()
+      .then(loaded => {
+        if (!cancelled) setList(loaded);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setError(cause instanceof Error ? cause.message : "The inbox could not be loaded.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [version]);
+
+  async function markRead(item: NotificationItem): Promise<boolean> {
+    if (item.read) return true;
+    setBusyId(item.id);
+    try {
+      const result = await api.markNotificationRead(item.id);
+      if (!result.ok) {
+        pushToast("Notification not marked read", result.message, "blocked");
+        return false;
+      }
+      setList(current =>
+        current
+          ? {
+              items: current.items.map(entry =>
+                entry.id === item.id ? { ...entry, read: true } : entry
+              ),
+              unreadCount: Math.max(0, current.unreadCount - 1)
+            }
+          : current
+      );
+      return true;
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function open(item: NotificationItem) {
+    const job = item.jobId ? snapshot.jobs.find(record => record.id === item.jobId) : undefined;
+    await markRead(item);
+    if (job) openOverlay({ kind: "job", id: job.id });
+    else pushToast("Job not in the picture", `${item.jobId} is not in the current operational picture.`, "blocked");
+  }
+
+  const items = list?.items ?? [];
+  const unread = list?.unreadCount ?? 0;
 
   return (
     <Drawer
       title="Notifications"
       footer={
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={() => {
-            closeOverlay();
-            router.push("/incidents");
-          }}
-        >
-          Open incident queue
-        </button>
+        <>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => setVersion(value => value + 1)}
+          >
+            <Icon name="refresh" /> Refresh
+          </button>
+          <DoneButton />
+        </>
       }
     >
       <Notice>
-        Notifications point to governed records. Operational decisions are completed inside the
-        record itself.
+        {list
+          ? unread
+            ? `${unread} unread. Notifications point to governed records; decisions are completed inside the record itself.`
+            : "Nothing unread. Notifications point to governed records; decisions are completed inside the record itself."
+          : "Notifications point to governed records. Operational decisions are completed inside the record itself."}
       </Notice>
-      <div className="attention-list">
+      {error ? (
+        <Notice icon="incident" tone="warning">
+          The inbox could not be loaded: {error}
+        </Notice>
+      ) : null}
+      <div className="notification-list">
         {items.length ? (
-          items.map(item => (
-            <button
-              type="button"
-              className="attention-item"
-              key={item.id}
-              style={{
-                width: "100%",
-                borderLeft: 0,
-                borderRight: 0,
-                borderTop: 0,
-                background: "transparent",
-                textAlign: "left"
-              }}
-              onClick={() => openOverlay({ kind: "incident", id: item.id })}
-            >
-              <span className={`severity-bar ${item.severity.toLowerCase()}`} />
-              <div>
-                <strong>{item.title}</strong>
-                <p>
-                  {item.enterprise} · {item.sla}
-                </p>
+          items.map(item => {
+            const linkedJob = item.jobId
+              ? snapshot.jobs.find(record => record.id === item.jobId)
+              : undefined;
+            return (
+              <div
+                className={`notification-item ${item.read ? "read" : "unread"}`}
+                key={item.id}
+                data-notification-id={item.id}
+              >
+                <span className="notification-dot" aria-hidden="true" />
+                {item.jobId ? (
+                  <button
+                    type="button"
+                    className="notification-open"
+                    disabled={busyId === item.id}
+                    onClick={() => void open(item)}
+                  >
+                    <strong>{item.title}</strong>
+                    <p>
+                      {item.detail}
+                      {linkedJob ? ` · ${linkedJob.site} (${linkedJob.id})` : ` · ${item.jobId}`}
+                    </p>
+                    <time>{item.createdAt}</time>
+                  </button>
+                ) : (
+                  <div>
+                    <strong>{item.title}</strong>
+                    <p>{item.detail}</p>
+                    <time>{item.createdAt}</time>
+                  </div>
+                )}
+                <span className="notification-actions">
+                  {item.read ? (
+                    <Chip>Read</Chip>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-small btn-secondary"
+                      disabled={busyId === item.id}
+                      onClick={() => void markRead(item)}
+                    >
+                      Mark read
+                    </button>
+                  )}
+                </span>
               </div>
-              <Severity level={item.severity} />
-            </button>
-          ))
-        ) : (
+            );
+          })
+        ) : list ? (
           <EmptyState
             icon="check"
-            title="No open incidents"
-            description="Every incident in the queue has been acknowledged or resolved."
+            title="No notifications"
+            description="Job, grant and account events for your scope will appear here."
           />
+        ) : error ? null : (
+          <EmptyState title="Loading notifications" />
         )}
       </div>
     </Drawer>
