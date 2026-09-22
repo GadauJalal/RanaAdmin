@@ -7,6 +7,8 @@
  *   - privileged actions always append an audit event
  *   - gateway serials are checked for duplicate identity before linking
  *   - the final active Platform Operator cannot be suspended
+ *   - only a support analyst holds a support grant, never into a suspended
+ *     enterprise, and only an active grant can be revoked
  *   - an installer with active jobs cannot be suspended
  *   - a gateway can only be linked inside an approved job
  *   - nothing is hard deleted
@@ -22,8 +24,12 @@ import { SNAPSHOT_COLLECTIONS, type Device, type Snapshot } from "@/lib/types";
 
 import {
   failure,
+  isPlatformOperator,
+  isSupportAnalyst,
   NIGERIAN_REGIONS,
   STAFF_CHECKLIST,
+  STAFF_ROLES,
+  staffRoleLabel,
   type AcceptInstallationInput,
   type ApiResult,
   type CreateEnterpriseInput,
@@ -47,6 +53,7 @@ import {
   type RecordChecklistItemInput,
   type RegisterDeviceInput,
   type ReissueAdminInviteInput,
+  type RevokeSupportGrantInput,
   type SetSiteLifecycleInput,
   type SiteDecisionInput,
   type StaffTransitionInput,
@@ -209,16 +216,34 @@ export const mockAdapter: OperationsApi = {
     const enterprise = snapshot.enterprises.find(item => item.id === input.id);
     if (!enterprise) return failure("not_found", "That enterprise account no longer exists.");
 
+    const suspended = enterprise.status === "Suspended";
+    if (input.transition === "Suspend" && suspended) {
+      return failure("enterprise_already_suspended", "This enterprise is already suspended.");
+    }
+    if (input.transition !== "Suspend" && !suspended) {
+      return failure(
+        "enterprise_not_suspended",
+        "This enterprise is not suspended, so there is nothing to restore."
+      );
+    }
+
     enterprise.status = input.transition === "Suspend" ? "Suspended" : "Active";
     enterprise.lastActivity = "Just now";
 
     // Suspension revokes live tenant support, it never deletes the tenant.
     if (enterprise.status === "Suspended") {
+      enterprise.suspendedSince = operationalTimestamp();
       snapshot.supportGrants
-        .filter(grant => grant.enterprise === enterprise.name && grant.status === "Active")
+        .filter(
+          grant =>
+            (grant.enterpriseId === enterprise.id || grant.enterprise === enterprise.name) &&
+            grant.status === "Active"
+        )
         .forEach(grant => {
           grant.status = "Revoked";
         });
+    } else {
+      delete enterprise.suspendedSince;
     }
 
     audit(
@@ -757,19 +782,25 @@ export const mockAdapter: OperationsApi = {
 
   async inviteStaff(input: InviteStaffInput) {
     const snapshot = draft();
-    const id = `STF-${input.role.slice(0, 3).toUpperCase()}-${String(Date.now()).slice(-3)}`;
-    const privileged =
-      ["Platform Operator", "Data Operations"].includes(input.role) &&
-      input.scope === "All tenants";
+    const role = STAFF_ROLES.find(item => item.value === input.role);
+    if (!role) return failure("invalid_input", "Select one of the four Rana54 staff roles.");
+    if (!input.reason.trim()) return failure("invalid_input", "An access reason is required.");
+    const email = input.email.trim();
+    if (snapshot.staff.some(item => item.email === maskEmail(email))) {
+      return failure("invalid_input", "A staff account with this email already exists.");
+    }
+
+    const id = `STF-${role.label.slice(0, 3).toUpperCase()}-${String(Date.now()).slice(-3)}`;
     const staff = {
       id,
       name: input.name.trim(),
-      email: maskEmail(input.email.trim()),
-      role: input.role,
-      scope: input.scope,
+      email: maskEmail(email),
+      role: role.label,
+      roleKey: role.value,
+      scope: role.scope,
       status: "Invited",
       lastAccess: "Never",
-      privileged
+      privileged: role.privileged
     };
     snapshot.staff.unshift(staff);
     audit(snapshot, "Rana54 staff invited", id, "Invitation issued", input.reason.trim());
@@ -783,11 +814,10 @@ export const mockAdapter: OperationsApi = {
 
     const isFinalPlatformOperator =
       input.transition === "Suspend" &&
-      person.role === "Platform Operator" &&
+      isPlatformOperator(person) &&
       person.status === "Active" &&
-      snapshot.staff.filter(
-        item => item.role === "Platform Operator" && item.status === "Active"
-      ).length === 1;
+      snapshot.staff.filter(item => isPlatformOperator(item) && item.status === "Active")
+        .length === 1;
 
     if (isFinalPlatformOperator) {
       return failure(
@@ -798,9 +828,14 @@ export const mockAdapter: OperationsApi = {
 
     person.status = input.transition === "Suspend" ? "Suspended" : "Active";
 
+    // Suspension revokes the member's active support grants in the same step.
     if (person.status === "Suspended") {
       snapshot.supportGrants
-        .filter(grant => grant.staff === person.name && grant.status === "Active")
+        .filter(
+          grant =>
+            (grant.staffId === person.id || grant.staff === person.name) &&
+            grant.status === "Active"
+        )
         .forEach(grant => {
           grant.status = "Revoked";
         });
@@ -821,7 +856,27 @@ export const mockAdapter: OperationsApi = {
     const staff = snapshot.staff.find(item => item.id === input.staffId);
     const enterprise = snapshot.enterprises.find(item => item.id === input.enterpriseId);
     if (!staff || !enterprise) {
-      return failure("not_found", "Select an active staff member and an enterprise.");
+      return failure("not_found", "Select a support analyst and an enterprise.");
+    }
+    // Only a support analyst works through grants; every other role already
+    // reaches every tenant through its standing platform access.
+    if (!isSupportAnalyst(staff)) {
+      return failure(
+        "invalid_input",
+        `Only a Support Analyst can hold a support grant; this staff member is a ${staffRoleLabel(staff.roleKey ?? staff.role)}.`
+      );
+    }
+    if (staff.status === "Suspended") {
+      return failure(
+        "staff_suspended",
+        "This staff member is suspended. Restore their access before granting support access."
+      );
+    }
+    if (enterprise.status === "Suspended") {
+      return failure(
+        "enterprise_suspended",
+        "This enterprise is suspended, so support access into it cannot be granted until it is restored."
+      );
     }
 
     const expires = operationalTimestamp(new Date(Date.now() + input.duration * 3600000));
@@ -832,7 +887,10 @@ export const mockAdapter: OperationsApi = {
       mode: "Read only",
       expires,
       reason: input.reason.trim(),
-      status: "Active"
+      status: "Active",
+      staffId: staff.id,
+      enterpriseId: enterprise.id,
+      granted: operationalTimestamp()
     };
     snapshot.supportGrants.unshift(grant);
     audit(
@@ -842,6 +900,25 @@ export const mockAdapter: OperationsApi = {
       "Read-only grant active",
       `${input.duration} hours. ${input.reason.trim()}`
     );
+    return ok(snapshot, { grant });
+  },
+
+  async revokeSupportGrant(input: RevokeSupportGrantInput) {
+    const snapshot = draft();
+    const grant = snapshot.supportGrants.find(item => item.id === input.id);
+    if (!grant) return failure("not_found", "That support grant no longer exists.");
+    if (grant.status === "Revoked") {
+      return failure("support_grant_already_revoked", "This support grant was already revoked.");
+    }
+    if (grant.status === "Expired") {
+      return failure(
+        "support_grant_expired",
+        "This support grant already expired on its own, so there is nothing to revoke."
+      );
+    }
+
+    grant.status = "Revoked";
+    audit(snapshot, "Tenant support access revoked", grant.id, "Revoked", input.reason.trim());
     return ok(snapshot, { grant });
   },
 
@@ -879,14 +956,30 @@ export const mockAdapter: OperationsApi = {
 
   async completeAccessReview() {
     const snapshot = draft();
+    const staffByRole: Record<string, number> = {};
+    snapshot.staff
+      .filter(item => item.status !== "Suspended")
+      .forEach(item => {
+        staffByRole[item.role] = (staffByRole[item.role] ?? 0) + 1;
+      });
+    const review = {
+      id: `REV-${suffix()}`,
+      at: operationalTimestamp(),
+      reviewer: snapshot.currentOperator.name,
+      staffByRole,
+      privilegedCount: snapshot.staff.filter(item => item.privileged && item.status === "Active")
+        .length,
+      activeSupportGrants: snapshot.supportGrants.filter(item => item.status === "Active").length
+    };
+    snapshot.accessReviews.unshift(review);
     audit(
       snapshot,
       "Privileged access review completed",
-      "Rana54 staff",
+      review.id,
       "Recorded",
-      "Scheduled access review completed for all active privileged staff"
+      `${review.privilegedCount} privileged staff and ${review.activeSupportGrants} active support grants attested`
     );
-    return ok(snapshot, undefined);
+    return ok(snapshot, { review });
   },
 
   async recordExport(kind: ExportKind) {

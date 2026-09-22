@@ -1,15 +1,20 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { useState } from "react";
 
 import { FormModal, Modal, ReasonModal } from "@/components/ui/Overlay";
 import { EmptyState, Notice } from "@/components/ui/primitives";
 import {
   api,
+  isSupportAnalyst,
   NIGERIAN_REGIONS,
+  STAFF_ROLES,
+  SUPPORT_GRANT_DURATIONS,
   type DeviceCertStatus,
   type DeviceRole,
-  type InstallerCertStatus
+  type InstallerCertStatus,
+  type StaffRole
 } from "@/lib/api";
 import { pastTense } from "@/lib/format";
 import type { Severity } from "@/lib/types";
@@ -134,7 +139,7 @@ export function EnterpriseTransitionModal({
   transition: "Suspend" | "Reactivate";
 }) {
   const snapshot = useSnapshot();
-  const { run } = useWorkspace();
+  const { run, openOverlay } = useWorkspace();
   const enterprise = snapshot.enterprises.find(item => item.id === id);
   if (!enterprise) return null;
 
@@ -147,22 +152,27 @@ export function EnterpriseTransitionModal({
       formId="enterprise-transition-form"
       submitLabel={`Confirm ${transition.toLowerCase()}`}
       submitTone={suspending ? "btn-danger" : "btn-primary"}
-      placeholder="Record the operational or governance reason"
+      placeholder="Write this for the customer, e.g. contract lapsed pending renewal"
       notice={
         <Notice icon="shield" tone={suspending ? "danger" : undefined}>
-          The account, identifiers, evidence and audit history remain intact.{" "}
+          The reason is written to the organisation&apos;s own audit log and is visible to it
+          once restored, so write it for the customer.{" "}
           {suspending
-            ? "New tenant activity and support grants will be blocked until reactivation."
-            : "Normal tenant activity can resume after this audited action."}
+            ? "Suspending revokes every Rana54 support grant into this organisation and locks out its users on their next request. Meter data keeps flowing and being recorded; identifiers, evidence and audit history remain intact."
+            : "Restoring lets the organisation's users sign in again. Support grants revoked at suspension are not reinstated; issue new ones if support work continues."}
         </Notice>
       }
       onSubmit={reason =>
         void run(() => api.transitionEnterprise({ id, transition, reason }), {
           failureTitle: `Enterprise account not ${pastTense(transition)}`,
-          success: () => ({
+          success: ({ enterprise: updated }) => ({
             title: `Enterprise account ${pastTense(transition)}`,
-            detail: "The tenant identity, evidence and audit history were retained."
-          })
+            detail: suspending
+              ? `${updated.name} is suspended. Its users are locked out and its support grants were revoked; meter data keeps flowing.`
+              : `${updated.name} is restored and its users can sign in again.`
+          }),
+          onSuccess: ({ enterprise: updated }) =>
+            openOverlay({ kind: "enterprise", id: updated.id })
         })
       }
     />
@@ -1116,11 +1126,14 @@ export function IncidentTransitionModal({
 export function InviteStaffModal() {
   const router = useRouter();
   const { run } = useWorkspace();
+  const [role, setRole] = useState<StaffRole>("support_analyst");
+  const selected = STAFF_ROLES.find(item => item.value === role) ?? STAFF_ROLES[3];
+  const analyst = role === "support_analyst";
 
   return (
     <FormModal
       title="Invite Rana54 staff"
-      description="Invite a staff member with explicit role and operating scope."
+      description="Invite a staff member with an explicit role. The platform derives their operating scope from it."
       formId="staff-form"
       submitLabel="Send invitation"
       onSubmit={data =>
@@ -1130,7 +1143,6 @@ export function InviteStaffModal() {
               name: text(data, "name"),
               email: text(data, "email"),
               role: text(data, "role"),
-              scope: text(data, "scope"),
               reason: text(data, "reason")
             }),
           {
@@ -1139,9 +1151,11 @@ export function InviteStaffModal() {
               title: "Staff invitation sent",
               detail: staff.tempPassword
                 ? `Provisioned. One-time temporary password for ${staff.email}: ${staff.tempPassword} (copy it now, it is not shown again).`
-                : staff.privileged
-                  ? "The account was invited. Privileged access still requires a separate access review."
-                  : "The role and scope were recorded with the invitation."
+                : isSupportAnalyst(staff)
+                  ? `${staff.name} was invited as a Support Analyst. They cannot activate their account until their first support grant is issued, so the invitation stays pending until then.`
+                  : staff.privileged
+                    ? `${staff.name} was invited. Privileged cross-tenant access is covered by the next access review.`
+                    : `${staff.name} was invited and an activation email was sent.`
             }),
             onSuccess: () => router.push("/access?tab=staff")
           }
@@ -1158,21 +1172,33 @@ export function InviteStaffModal() {
       </div>
       <div className="field">
         <label htmlFor="staff-role">Role</label>
-        <select id="staff-role" name="role" required defaultValue="Support Analyst">
-          <option>Support Analyst</option>
-          <option>Field Operations</option>
-          <option>Data Operations</option>
-          <option>Platform Operator</option>
+        <select
+          id="staff-role"
+          name="role"
+          required
+          value={role}
+          onChange={event => setRole(event.target.value as StaffRole)}
+        >
+          {STAFF_ROLES.map(item => (
+            <option key={item.value} value={item.value}>
+              {item.label}
+            </option>
+          ))}
         </select>
       </div>
       <div className="field">
         <label htmlFor="staff-scope">Scope</label>
-        <select id="staff-scope" name="scope" required defaultValue="Assigned tenants">
-          <option>Assigned tenants</option>
-          <option>Nigeria</option>
-          <option>West Africa</option>
-          <option>All tenants</option>
-        </select>
+        <input
+          id="staff-scope"
+          value={analyst ? "Assigned tenants, via support grants" : selected.scope}
+          disabled
+          readOnly
+        />
+        <small>
+          {analyst
+            ? "No standing access. Every read into a tenant goes through a time-limited support grant."
+            : "Standing access across every tenant on the Rana54 platform."}
+        </small>
       </div>
       <div className="field full">
         <label htmlFor="staff-reason">Access reason</label>
@@ -1186,7 +1212,9 @@ export function InviteStaffModal() {
       </div>
       <div className="field full">
         <Notice icon="shield">
-          Privileged cross-tenant access is reviewed separately and cannot be self-approved.
+          {analyst
+            ? "A Support Analyst cannot accept their invitation until their first support grant is issued; that wait is expected, not a stuck invite."
+            : "An activation email is sent. Privileged cross-tenant access is reviewed separately and cannot be self-approved."}
         </Notice>
       </div>
     </FormModal>
@@ -1217,14 +1245,19 @@ export function StaffTransitionModal({
       notice={
         <Notice icon="shield" tone={suspending ? "danger" : undefined}>
           History and assignments are retained. This action does not delete the staff identity.
+          {suspending
+            ? " Any active support grants held by this member are revoked in the same step."
+            : ""}
         </Notice>
       }
       onSubmit={reason =>
         void run(() => api.transitionStaff({ id, transition, reason }), {
-          failureTitle: "Suspension blocked",
+          failureTitle: suspending ? "Suspension blocked" : "Access not restored",
           success: () => ({
             title: `Staff access ${pastTense(transition)}`,
-            detail: "Identity history and prior assignments were retained."
+            detail: suspending
+              ? "Identity history and prior assignments were retained. Active support grants were revoked."
+              : "Identity history and prior assignments were retained."
           })
         })
       }
@@ -1232,16 +1265,25 @@ export function StaffTransitionModal({
   );
 }
 
+/**
+ * Issue a read-only, time-limited support grant. Only a Support Analyst can
+ * hold one (every other role already reaches every tenant), so the roster is
+ * filtered to analysts. An invited analyst is offered too: their first grant
+ * is what lets them activate their account at all.
+ */
 export function SupportGrantModal({ enterpriseId }: { enterpriseId?: string }) {
   const snapshot = useSnapshot();
   const router = useRouter();
   const { run } = useWorkspace();
-  const staff = snapshot.staff.filter(item => item.status === "Active");
+  const analysts = snapshot.staff.filter(
+    item => isSupportAnalyst(item) && item.status !== "Suspended"
+  );
+  const enterprises = snapshot.enterprises.filter(item => item.status !== "Suspended");
 
   return (
     <FormModal
       title="Grant tenant support access"
-      description="Create a read-only, time-limited, audited support session."
+      description="Create a read-only, time-limited, audited support session for a Support Analyst."
       formId="support-form"
       submitLabel="Grant temporary access"
       onSubmit={data =>
@@ -1265,15 +1307,19 @@ export function SupportGrantModal({ enterpriseId }: { enterpriseId?: string }) {
       }
     >
       <div className="field">
-        <label htmlFor="support-staff">Staff member</label>
+        <label htmlFor="support-staff">Support Analyst</label>
         <select id="support-staff" name="staffId" required defaultValue="">
-          <option value="">Select staff</option>
-          {staff.map(item => (
+          <option value="">Select analyst</option>
+          {analysts.map(item => (
             <option key={item.id} value={item.id}>
-              {item.name} · {item.role}
+              {item.name}
+              {item.status === "Invited" ? " · Invited, first grant" : ""}
             </option>
           ))}
         </select>
+        {analysts.length ? null : (
+          <small>No Support Analyst is on the roster. Invite one first.</small>
+        )}
       </div>
       <div className="field">
         <label htmlFor="support-enterprise">Enterprise</label>
@@ -1284,25 +1330,28 @@ export function SupportGrantModal({ enterpriseId }: { enterpriseId?: string }) {
           defaultValue={enterpriseId ?? ""}
         >
           <option value="">Select enterprise</option>
-          {snapshot.enterprises.map(item => (
+          {enterprises.map(item => (
             <option key={item.id} value={item.id}>
               {item.name}
             </option>
           ))}
         </select>
+        <small>A suspended enterprise cannot receive support access.</small>
       </div>
       <div className="field">
         <label htmlFor="support-duration">Duration</label>
         <select id="support-duration" name="duration" required defaultValue="2">
-          <option value="2">2 hours</option>
-          <option value="4">4 hours</option>
-          <option value="8">8 hours</option>
-          <option value="24">24 hours</option>
+          {SUPPORT_GRANT_DURATIONS.map(hours => (
+            <option key={hours} value={hours}>
+              {hours} hours
+            </option>
+          ))}
         </select>
       </div>
       <div className="field">
         <label htmlFor="support-mode">Mode</label>
         <input id="support-mode" value="Read only" disabled readOnly />
+        <small>Support access is always read only.</small>
       </div>
       <div className="field full">
         <label htmlFor="support-reason">Support reason</label>
@@ -1316,10 +1365,45 @@ export function SupportGrantModal({ enterpriseId }: { enterpriseId?: string }) {
       </div>
       <div className="field full">
         <Notice icon="lock">
-          This does not impersonate the enterprise user. Personal data stays masked and every
-          view is audited.
+          This does not impersonate the enterprise user. Personal data stays masked, every view
+          is audited on the tenant&apos;s own log, and the reason is visible to the customer.
         </Notice>
       </div>
     </FormModal>
+  );
+}
+
+/** End an active support grant early. It takes effect on the analyst's next request. */
+export function RevokeGrantModal({ id }: { id: string }) {
+  const snapshot = useSnapshot();
+  const { run } = useWorkspace();
+  const grant = snapshot.supportGrants.find(item => item.id === id);
+  if (!grant) return null;
+
+  return (
+    <ReasonModal
+      title="Revoke support access"
+      description={`${grant.staff} · ${grant.enterprise} · expires ${grant.expires}`}
+      formId="revoke-grant-form"
+      submitLabel="Revoke access"
+      submitTone="btn-danger"
+      placeholder="Why the support session is being ended early"
+      notice={
+        <Notice icon="shield" tone="danger">
+          Access ends on the analyst&apos;s very next request, not at token expiry. The grant
+          stays in history as revoked; a grant that has already expired on its own is left as
+          it is.
+        </Notice>
+      }
+      onSubmit={reason =>
+        void run(() => api.revokeSupportGrant({ id, reason }), {
+          failureTitle: "Support access not revoked",
+          success: ({ grant: revoked }) => ({
+            title: "Support access revoked",
+            detail: `${revoked.staff} no longer has access to ${revoked.enterprise}.`
+          })
+        })
+      }
+    />
   );
 }

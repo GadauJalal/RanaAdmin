@@ -13,6 +13,7 @@
  */
 
 import type {
+  AccessReview,
   Device,
   Enterprise,
   Incident,
@@ -35,6 +36,12 @@ export type FailureCode =
   | "final_platform_operator"
   | "job_not_ready_for_acceptance"
   | "job_not_blocked"
+  | "staff_suspended"
+  | "enterprise_suspended"
+  | "enterprise_already_suspended"
+  | "enterprise_not_suspended"
+  | "support_grant_already_revoked"
+  | "support_grant_expired"
   | "network_error"
   | "server_error";
 
@@ -231,11 +238,41 @@ export interface IncidentTransitionInput {
   reason: string;
 }
 
+/** The platform's staff role vocabulary, with the copy the console shows for each. */
+export const STAFF_ROLES = [
+  { value: "admin", label: "Platform Operator", scope: "All tenants", privileged: true },
+  { value: "data_operations", label: "Data Operations", scope: "All tenants", privileged: true },
+  { value: "field_operations", label: "Field Operations", scope: "All tenants", privileged: false },
+  {
+    value: "support_analyst",
+    label: "Support Analyst",
+    scope: "Assigned tenants",
+    privileged: false
+  }
+] as const;
+
+export type StaffRole = (typeof STAFF_ROLES)[number]["value"];
+
+/** "Platform Operator" for "admin"; an unknown role reads as its wire value. */
+export function staffRoleLabel(role: string): string {
+  return STAFF_ROLES.find(item => item.value === role)?.label ?? role;
+}
+
+/** True for the one role that holds no standing access and works through support grants. */
+export function isSupportAnalyst(person: { role: string; roleKey?: string }): boolean {
+  return person.roleKey === "support_analyst" || person.role === "Support Analyst";
+}
+
+/** True for the platform-wide operator role that must never drop to zero active members. */
+export function isPlatformOperator(person: { role: string; roleKey?: string }): boolean {
+  return person.roleKey === "admin" || person.role === "Platform Operator";
+}
+
 export interface InviteStaffInput {
   name: string;
   email: string;
-  role: string;
-  scope: string;
+  /** Wire value; the scope is derived from it by the platform. */
+  role: StaffRole | string;
   reason: string;
 }
 
@@ -245,11 +282,19 @@ export interface StaffTransitionInput {
   reason: string;
 }
 
+/** The durations the platform accepts for a support grant, in hours. */
+export const SUPPORT_GRANT_DURATIONS = [2, 4, 8, 24] as const;
+
 export interface CreateSupportGrantInput {
   staffId: string;
   enterpriseId: string;
   /** Duration in hours. */
   duration: number;
+  reason: string;
+}
+
+export interface RevokeSupportGrantInput {
+  id: string;
   reason: string;
 }
 
@@ -366,11 +411,17 @@ export interface OperationsApi {
     input: CreateSupportGrantInput
   ): Promise<ApiResult<{ grant: SupportGrant }>>;
 
+  /** End a support grant early. Only an active grant can be revoked. */
+  revokeSupportGrant(
+    input: RevokeSupportGrantInput
+  ): Promise<ApiResult<{ grant: SupportGrant }>>;
+
   runDeviceDiagnostic(id: string): Promise<ApiResult<{ device: Device }>>;
 
   runServiceCheck(id: string): Promise<ApiResult<undefined>>;
 
-  completeAccessReview(): Promise<ApiResult<undefined>>;
+  /** Records an immutable attestation that privileged access was reviewed now. */
+  completeAccessReview(): Promise<ApiResult<{ review: AccessReview }>>;
 
   /** Records that an operator exported data. The file itself is built client-side. */
   recordExport(kind: ExportKind): Promise<ApiResult<undefined>>;

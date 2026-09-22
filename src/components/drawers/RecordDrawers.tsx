@@ -16,6 +16,8 @@ import { Drawer } from "@/components/ui/Overlay";
 import { Chip, EmptyState, Notice, Progress, Severity } from "@/components/ui/primitives";
 import {
   api,
+  isPlatformOperator,
+  isSupportAnalyst,
   STAFF_CHECKLIST,
   type ChecklistItem,
   type JobDetail,
@@ -67,13 +69,15 @@ export function EnterpriseDrawer({ id }: { id: string }) {
       title={enterprise.name}
       footer={
         <>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => openOverlay({ kind: "support-grant", enterpriseId: enterprise.id })}
-          >
-            <Icon name="shield" /> Grant read-only support
-          </button>
+          {suspended ? null : (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => openOverlay({ kind: "support-grant", enterpriseId: enterprise.id })}
+            >
+              <Icon name="shield" /> Grant read-only support
+            </button>
+          )}
           <button
             type="button"
             className={`btn ${suspended ? "btn-secondary" : "btn-danger"}`}
@@ -101,9 +105,18 @@ export function EnterpriseDrawer({ id }: { id: string }) {
           { label: "Status", value: <Chip>{enterprise.status}</Chip> },
           { label: "Readiness", value: `${enterprise.readiness}%` },
           { label: "Live sites", value: `${enterprise.liveSites} of ${enterprise.sites}` },
-          { label: "Last activity", value: enterprise.lastActivity }
+          suspended
+            ? { label: "Suspended since", value: enterprise.suspendedSince ?? "Not recorded" }
+            : { label: "Last activity", value: enterprise.lastActivity }
         ]}
       />
+      {suspended ? (
+        <Notice icon="shield" tone="danger">
+          Suspended since {enterprise.suspendedSince ?? "an unrecorded time"}. Its users are
+          locked out and Rana54 support grants into it were revoked; meter data keeps flowing.
+          Site provisioning and support access resume once the account is reactivated.
+        </Notice>
+      ) : null}
 
       <DetailSection
         title="Initial organization administrator"
@@ -151,13 +164,15 @@ export function EnterpriseDrawer({ id }: { id: string }) {
       <DetailSection
         title="Sites"
         action={
-          <button
-            type="button"
-            className="link-button"
-            onClick={() => openOverlay({ kind: "new-site", enterpriseId: enterprise.id })}
-          >
-            Provision site
-          </button>
+          suspended ? null : (
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => openOverlay({ kind: "new-site", enterpriseId: enterprise.id })}
+            >
+              Provision site
+            </button>
+          )
         }
       >
         {sites.length ? (
@@ -859,14 +874,15 @@ export function StaffDrawer({ id }: { id: string }) {
   const person = snapshot.staff.find(record => record.id === id);
   if (!person) return <MissingRecord label="staff account" />;
 
-  const grants = snapshot.supportGrants.filter(grant => grant.staff === person.name);
+  const grants = snapshot.supportGrants.filter(grant =>
+    grant.staffId ? grant.staffId === person.id : grant.staff === person.name
+  );
+  const analyst = isSupportAnalyst(person);
   const activePlatformOperators = snapshot.staff.filter(
-    item => item.role === "Platform Operator" && item.status === "Active"
+    item => isPlatformOperator(item) && item.status === "Active"
   ).length;
   const isFinalPlatformOperator =
-    person.role === "Platform Operator" &&
-    person.status === "Active" &&
-    activePlatformOperators === 1;
+    isPlatformOperator(person) && person.status === "Active" && activePlatformOperators === 1;
 
   return (
     <Drawer
@@ -916,22 +932,58 @@ export function StaffDrawer({ id }: { id: string }) {
           { label: "Last access", value: person.lastAccess }
         ]}
       />
-      <DetailSection title="Tenant support grants">
+      {analyst && person.status === "Invited" ? (
+        <Notice icon="info">
+          A Support Analyst cannot accept their invitation until their first support grant is
+          issued. This pending state is expected until support access is granted.
+        </Notice>
+      ) : null}
+      <DetailSection
+        title="Tenant support grants"
+        action={
+          analyst && person.status !== "Suspended" ? (
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => openOverlay({ kind: "support-grant" })}
+            >
+              Grant access
+            </button>
+          ) : null
+        }
+      >
         {grants.length ? (
           <FunctionList>
             {grants.map(grant => (
               <FunctionRow
                 key={grant.id}
                 title={grant.enterprise}
-                meta={`${grant.mode} · expires ${grant.expires}`}
-                trailing={<Chip>{grant.status}</Chip>}
+                meta={`${grant.id} · ${grant.mode} · expires ${grant.expires} · ${grant.reason}`}
+                trailing={
+                  <span className="function-row-actions">
+                    <Chip>{grant.status}</Chip>
+                    {grant.status === "Active" ? (
+                      <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => openOverlay({ kind: "revoke-grant", id: grant.id })}
+                      >
+                        Revoke
+                      </button>
+                    ) : null}
+                  </span>
+                }
               />
             ))}
           </FunctionList>
         ) : (
           <FunctionRow
             title="No tenant support access"
-            meta="Create a time-limited grant only when support work requires it."
+            meta={
+              analyst
+                ? "Create a time-limited grant only when support work requires it."
+                : "This role reaches every tenant through its standing platform access and holds no support grants."
+            }
             trailing={<Chip>None</Chip>}
           />
         )}
