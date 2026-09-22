@@ -41,6 +41,7 @@ export type Overlay =
   | { kind: "new-incident" }
   | { kind: "invite-staff" }
   | { kind: "support-grant"; enterpriseId?: string }
+  | { kind: "revoke-grant"; id: string }
   | { kind: "site-decision"; id: string; decision: "Approved" | "Returned" }
   | { kind: "incident-transition"; id: string; transition: "Assign" | "Acknowledge" | "Resolve" | "Reopen" }
   | { kind: "enterprise-transition"; id: string; transition: "Suspend" | "Reactivate" }

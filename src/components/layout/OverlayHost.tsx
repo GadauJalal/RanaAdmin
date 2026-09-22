@@ -25,6 +25,7 @@ import {
   ReassignJobModal,
   RegisterDeviceModal,
   ReissueAdminModal,
+  RevokeGrantModal,
   SiteDecisionModal,
   SiteLifecycleModal,
   StaffTransitionModal,
@@ -72,6 +73,8 @@ function renderOverlay(overlay: Overlay) {
       return <InviteStaffModal />;
     case "support-grant":
       return <SupportGrantModal enterpriseId={overlay.enterpriseId} />;
+    case "revoke-grant":
+      return <RevokeGrantModal id={overlay.id} />;
     case "site-decision":
       return <SiteDecisionModal id={overlay.id} decision={overlay.decision} />;
     case "incident-transition":

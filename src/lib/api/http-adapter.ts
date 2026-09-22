@@ -4,26 +4,30 @@
  * Talks to the real Rana54 API through the same-origin proxy at /api. The
  * operational picture is assembled from the platform-wide list endpoints
  * (`GET /organisations`, `/sites`, `/devices`, `/jobs`, `/site-requests`,
- * `/audit`) plus the operator (`GET /me`), every platform user
- * (`GET /admin/users`), the installer roster (`GET /installers`) and API
+ * `/audit`) plus the operator (`GET /me`), the Rana54 staff roster
+ * (`GET /staff`, falling back to `GET /admin/users` on an older backend),
+ * support grants (`GET /support-grants`), access reviews
+ * (`GET /access-reviews`), the installer roster (`GET /installers`) and API
  * health (`GET /health`). Each list is read independently and tolerantly, so a
  * missing permission or an older backend empties one collection instead of
  * failing the whole console.
  *
  * Writes call the real workflow endpoints: create an enterprise and provision
  * its first administrator (whose one-time temporary password is surfaced once
- * and never persisted), provision a site and move it through its lifecycle,
- * register a device, decide a site request, onboard installers, create,
- * reassign, link, unblock, evidence and accept jobs, suspend or restore staff
- * and installers, and read or clear the operator's notification inbox.
- * Operations the backend does not model yet (incidents, enterprise suspension,
- * support grants, diagnostics) are refused with a plain message.
+ * and never persisted), suspend or restore an enterprise, provision a site and
+ * move it through its lifecycle, register a device, decide a site request,
+ * onboard installers, create, reassign, link, unblock, evidence and accept
+ * jobs, invite, suspend or restore staff and installers, issue and revoke
+ * time-limited support grants, record an access review, and read or clear the
+ * operator's notification inbox. Operations the backend does not model yet
+ * (incidents, diagnostics) are refused with a plain message.
  *
  * See docs/BACKEND_INTEGRATION_STATUS.md for the remaining gap list.
  */
 
 import { operationalTimestamp } from "@/lib/format";
 import type {
+  AccessReview,
   AuditEvent,
   Device,
   Enterprise,
@@ -40,6 +44,8 @@ import type {
 
 import {
   failure,
+  STAFF_ROLES,
+  staffRoleLabel,
   type AcceptInstallationInput,
   type ApiResult,
   type CreateEnterpriseInput,
@@ -64,6 +70,7 @@ import {
   type RecordChecklistItemInput,
   type RegisterDeviceInput,
   type ReissueAdminInviteInput,
+  type RevokeSupportGrantInput,
   type SetSiteLifecycleInput,
   type SiteDecisionInput,
   type StaffTransitionInput,
@@ -111,6 +118,48 @@ interface BackendOrganisation {
   tradingName?: string | null;
   email?: string;
   createdAt?: string;
+  /** Derived by the backend on every read; absent on an older backend. */
+  status?: "suspended" | "onboarding" | "active" | string;
+  suspendedAt?: string | null;
+}
+
+/** GET /staff row: the Rana54 roster, with the wire role and derived scope. */
+interface BackendStaff {
+  id: string;
+  userId: string;
+  name: string | null;
+  email: string;
+  role: string;
+  scope: "All tenants" | "Assigned tenants" | string;
+  status: "Active" | "Invited" | "Suspended" | string;
+  lastAccess: string | null;
+  privileged: boolean;
+}
+
+interface BackendSupportGrant {
+  id: string;
+  staffId: string | null;
+  staffName: string | null;
+  organisationId: string;
+  organisationName: string | null;
+  mode: "Read only" | string;
+  status: "Active" | "Expired" | "Revoked" | string;
+  reason: string;
+  grantedAt: string;
+  expiresAt: string;
+  revokedAt: string | null;
+}
+
+interface BackendAccessReview {
+  id: string;
+  at: string;
+  reviewerId: string;
+  reviewerName: string;
+  snapshot: {
+    staffByRole: Record<string, number>;
+    privilegedCount: number;
+    activeSupportGrants: number;
+  };
 }
 
 interface BackendSite {
@@ -329,17 +378,65 @@ function del<T>(path: string) {
   return request<T>(path, { method: "DELETE" });
 }
 
+/**
+ * The backend's stable conflict codes (carried in `message`) and the sentence
+ * the operator reads for each. A machine string is never shown raw.
+ */
+const CONFLICT_MESSAGES: Record<string, string> = {
+  final_platform_operator:
+    "Activate another Platform Operator before suspending this final platform-wide operator.",
+  staff_suspended:
+    "This staff member is suspended. Restore their access before granting support access.",
+  enterprise_suspended:
+    "This enterprise is suspended, so support access into it cannot be granted until it is restored.",
+  enterprise_already_suspended: "This enterprise is already suspended.",
+  enterprise_not_suspended: "This enterprise is not suspended, so there is nothing to restore.",
+  support_grant_already_revoked: "This support grant was already revoked.",
+  support_grant_expired:
+    "This support grant already expired on its own, so there is nothing to revoke.",
+  installer_has_active_jobs: "Reassign this installer's active jobs before suspending them.",
+  job_not_ready_for_acceptance:
+    "This job is not ready for acceptance. Commissioning evidence must be complete first.",
+  job_not_blocked: "Only a blocked job can be resumed.",
+  site_not_approved: "Select an approved site request first.",
+  duplicate_gateway_identity: "That gateway serial already belongs to another device."
+};
+
+/** Backend validation messages that quote wire values, rewritten for the operator. */
+function readableValidation(message: string): string {
+  const grantRole = message.match(/^Only a support_analyst can hold a support grant; this staff member is "([^"]+)"/);
+  if (grantRole) {
+    return `Only a Support Analyst can hold a support grant; this staff member is a ${staffRoleLabel(grantRole[1])}.`;
+  }
+  const staffRoute = message.match(/^Role "([^"]+)" is provisioned through POST \/staff/);
+  if (staffRoute) {
+    return `${staffRoleLabel(staffRoute[1])} accounts are invited through the staff roster, not the platform user route.`;
+  }
+  return message;
+}
+
 /** Map a backend rejection to the console's failure vocabulary. */
 function toFailure(outcome: { status: number; code: string; message: string }, snapshot?: Snapshot) {
   const known: FailureCode[] = [
     "site_not_approved",
     "duplicate_gateway_identity",
     "installer_has_active_jobs",
+    "final_platform_operator",
     "job_not_ready_for_acceptance",
-    "job_not_blocked"
+    "job_not_blocked",
+    "staff_suspended",
+    "enterprise_already_suspended",
+    "enterprise_not_suspended",
+    "enterprise_suspended",
+    "support_grant_already_revoked",
+    "support_grant_expired"
   ];
   const text = `${outcome.code} ${outcome.message}`;
-  const matched = known.find(code => text.includes(code));
+  // The exact code first; a longer code that merely contains a shorter one
+  // ("enterprise_already_suspended") must not be read as the shorter one.
+  const matched =
+    known.find(code => outcome.message.trim() === code) ??
+    [...known].sort((a, b) => b.length - a.length).find(code => text.includes(code));
   const code: FailureCode = matched
     ? matched
     : outcome.status === 404
@@ -349,7 +446,11 @@ function toFailure(outcome: { status: number; code: string; message: string }, s
         : outcome.code === "network_error"
           ? "network_error"
           : "server_error";
-  return failure(code, outcome.message, snapshot);
+  const message =
+    matched && outcome.message.trim() === matched
+      ? (CONFLICT_MESSAGES[matched] ?? outcome.message)
+      : readableValidation(outcome.message);
+  return failure(code, message, snapshot);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -440,7 +541,8 @@ function regionLabel(region: string | null | undefined): string {
   return region ? (REGION_LABELS[region] ?? capitalise(region)) : "Unassigned";
 }
 
-function mapStaff(user: BackendAdminUser): StaffMember {
+/** An older backend without GET /staff: platform users stand in for the roster. */
+function mapLegacyStaff(user: BackendAdminUser): StaffMember {
   const status =
     user.status === "suspended" ? "Suspended" : user.status === "active" ? "Active" : "Invited";
   return {
@@ -453,6 +555,60 @@ function mapStaff(user: BackendAdminUser): StaffMember {
     status,
     lastAccess: "Not reported",
     privileged: false
+  };
+}
+
+const STAFF_STATUS: Record<string, string> = {
+  Active: "Active",
+  Invited: "Invited",
+  Suspended: "Suspended"
+};
+
+function mapStaff(member: BackendStaff): StaffMember {
+  const role = STAFF_ROLES.find(item => item.value === member.role);
+  return {
+    id: member.id,
+    name: member.name || member.email,
+    email: member.email,
+    role: staffRoleLabel(member.role),
+    roleKey: member.role,
+    scope: member.scope || role?.scope || "All tenants",
+    status: STAFF_STATUS[member.status] ?? capitalise(member.status),
+    lastAccess: when(member.lastAccess, "Never"),
+    privileged: typeof member.privileged === "boolean" ? member.privileged : Boolean(role?.privileged)
+  };
+}
+
+function mapSupportGrant(grant: BackendSupportGrant, enterprises: BackendOrganisation[]): SupportGrant {
+  return {
+    id: grant.id,
+    staff: grant.staffName || grant.staffId || "Former staff member",
+    enterprise:
+      grant.organisationName ||
+      enterprises.find(item => item.id === grant.organisationId)?.name ||
+      grant.organisationId,
+    mode: grant.mode || "Read only",
+    expires: when(grant.expiresAt),
+    reason: grant.reason,
+    status: STAFF_STATUS[grant.status] ?? capitalise(grant.status),
+    ...(grant.staffId ? { staffId: grant.staffId } : null),
+    enterpriseId: grant.organisationId,
+    granted: when(grant.grantedAt)
+  };
+}
+
+function mapAccessReview(review: BackendAccessReview): AccessReview {
+  const byRole: Record<string, number> = {};
+  for (const [role, count] of Object.entries(review.snapshot?.staffByRole ?? {})) {
+    byRole[staffRoleLabel(role)] = count;
+  }
+  return {
+    id: review.id,
+    at: when(review.at),
+    reviewer: review.reviewerName || review.reviewerId,
+    staffByRole: byRole,
+    privilegedCount: review.snapshot?.privilegedCount ?? 0,
+    activeSupportGrants: review.snapshot?.activeSupportGrants ?? 0
   };
 }
 
@@ -481,6 +637,12 @@ const SITE_STATUS: Record<string, string> = {
   provisioned: "Provisioned",
   active: "Active",
   decommissioned: "Decommissioned"
+};
+
+const ENTERPRISE_STATUS: Record<string, string> = {
+  suspended: "Suspended",
+  onboarding: "Onboarding",
+  active: "Active"
 };
 
 function mapSite(site: BackendSite, enterprises: BackendOrganisation[]): PlatformSite {
@@ -513,11 +675,18 @@ function mapEnterprise(
     20 + (extra?.adminUserId ? 20 : 0) + (orgSites.length ? 30 : 0) + (liveSites ? 30 : 0)
   );
   const password = sessionPasswords.get(org.id);
+  // The backend derives the status on every read; an older backend without
+  // the field falls back to the console's own site-based derivation.
+  const status = org.status
+    ? (ENTERPRISE_STATUS[org.status] ?? capitalise(org.status))
+    : liveSites
+      ? "Active"
+      : "Onboarding";
   return {
     id: org.id,
     name: org.name,
     region: extra?.region ?? "Nigeria",
-    status: liveSites ? "Active" : "Onboarding",
+    status,
     readiness,
     adminName: extra?.adminName ?? null,
     adminEmail: extra?.adminEmail ?? org.email ?? null,
@@ -525,6 +694,7 @@ function mapEnterprise(
     sites: orgSites.length,
     liveSites,
     lastActivity: when(org.createdAt, "Not reported"),
+    ...(status === "Suspended" ? { suspendedSince: when(org.suspendedAt, "Not recorded") } : null),
     adminUserId: extra?.adminUserId,
     ...(password ? { adminTempPassword: password } : null)
   };
@@ -724,24 +894,48 @@ function mapHealth(health: BackendHealth | null): PlatformService[] {
 
 const EMPTY_OPERATOR = { name: "Operator", scope: "Rana54 platform", permission: "Platform access" };
 
+/**
+ * True once GET /staff has answered 404, i.e. the backend predates the staff
+ * roster. Staff reads and writes then use the platform user routes instead.
+ */
+let legacyStaffRoutes = false;
+
 async function buildSnapshot(): Promise<Snapshot> {
-  const [me, users, installers, health, organisations, sites, devices, jobs, siteRequests, audit] =
-    await Promise.all([
-      request<BackendIdentity>("/me"),
-      request<unknown>("/admin/users"),
-      request<unknown>(`/installers?limit=${PAGE}`),
-      request<BackendHealth>("/health"),
-      request<unknown>(`/organisations?limit=${PAGE}`),
-      request<unknown>(`/sites?limit=${PAGE}`),
-      request<unknown>(`/devices?limit=${PAGE}`),
-      request<unknown>(`/jobs?limit=${PAGE}`),
-      request<unknown>(`/site-requests?limit=${PAGE}`),
-      request<unknown>(`/audit?limit=${PAGE}`)
-    ]);
+  const [
+    me,
+    users,
+    staff,
+    supportGrants,
+    accessReviews,
+    installers,
+    health,
+    organisations,
+    sites,
+    devices,
+    jobs,
+    siteRequests,
+    audit
+  ] = await Promise.all([
+    request<BackendIdentity>("/me"),
+    request<unknown>("/admin/users"),
+    request<unknown>(`/staff?limit=${PAGE}`),
+    request<unknown>(`/support-grants?limit=${PAGE}`),
+    request<unknown>("/access-reviews?limit=50"),
+    request<unknown>(`/installers?limit=${PAGE}`),
+    request<BackendHealth>("/health"),
+    request<unknown>(`/organisations?limit=${PAGE}`),
+    request<unknown>(`/sites?limit=${PAGE}`),
+    request<unknown>(`/devices?limit=${PAGE}`),
+    request<unknown>(`/jobs?limit=${PAGE}`),
+    request<unknown>(`/site-requests?limit=${PAGE}`),
+    request<unknown>(`/audit?limit=${PAGE}`)
+  ]);
 
   if (!me.ok && me.status === 401) {
     throw new Error("Sign in to load the operational picture.");
   }
+
+  legacyStaffRoutes = !staff.ok && staff.status === 404;
 
   const currentOperator = me.ok
     ? {
@@ -758,6 +952,9 @@ async function buildSnapshot(): Promise<Snapshot> {
   const requestRows = asList<BackendSiteRequest>(siteRequests, "siteRequests");
   const auditRows = asList<BackendAuditEntry>(audit, "entries");
   const userRows = asList<BackendAdminUser>(users, "users");
+  const staffRows = asList<BackendStaff>(staff, "staff");
+  const grantRows = asList<BackendSupportGrant>(supportGrants, "supportGrants");
+  const reviewRows = asList<BackendAccessReview>(accessReviews, "accessReviews");
   const installerRows = asList<BackendInstaller>(installers, "installers");
 
   // Enterprises this console created but the list did not return (an older
@@ -787,8 +984,9 @@ async function buildSnapshot(): Promise<Snapshot> {
     jobs: jobRows.map(job => mapJob(job, lookups)),
     devices: deviceRows.map(device => mapDevice(device, lookups, jobRows)),
     incidents: [],
-    staff: userRows.map(mapStaff),
-    supportGrants: [],
+    staff: legacyStaffRoutes ? userRows.map(mapLegacyStaff) : staffRows.map(mapStaff),
+    supportGrants: grantRows.map(grant => mapSupportGrant(grant, allOrgs)),
+    accessReviews: reviewRows.map(mapAccessReview),
     services: mapHealth(health.ok ? health.body : null),
     audit: auditRows.map(mapAudit)
   };
@@ -881,8 +1079,26 @@ export const httpAdapter: OperationsApi = {
     return { ok: true, snapshot, data: { enterprise: listed ?? enterprise } };
   },
 
-  transitionEnterprise(_input: EnterpriseTransitionInput) {
-    return notAvailable<{ enterprise: Enterprise }>("Suspending or reactivating an enterprise");
+  /**
+   * Suspend or restore an enterprise (POST /organisations/{id}/transitions).
+   * Suspension revokes every support grant into the organisation and locks
+   * out its users on their next request; meter data keeps flowing. The reason
+   * lands on the organisation's own audit log, so it is written for the
+   * customer. The backend answers 409 for a transition that changes nothing.
+   */
+  async transitionEnterprise({ id, transition, reason }: EnterpriseTransitionInput) {
+    const result = await post<{ organisation: BackendOrganisation }>(
+      `/organisations/${encodeURIComponent(id)}/transitions`,
+      { transition: transition === "Suspend" ? "Suspend" : "Restore", reason }
+    );
+    if (!result.ok) return toFailure(result);
+
+    const updated = result.body?.organisation;
+    const snapshot = await buildSnapshot();
+    const enterprise =
+      snapshot.enterprises.find(item => item.id === id) ??
+      mapEnterprise(updated ?? { id, name: id }, [], storedEnterprises());
+    return { ok: true, snapshot, data: { enterprise } };
   },
 
   async reissueAdminInvite({ id }: ReissueAdminInviteInput) {
@@ -1190,40 +1406,162 @@ export const httpAdapter: OperationsApi = {
     return notAvailable<{ incident: Incident }>("The incidents subsystem");
   },
 
-  /** Platform staff are provisioned as platform admins; the temp password is returned once. */
+  /**
+   * Invite a Rana54 staff member (POST /staff). The backend derives the scope
+   * from the role and emails an activation link; no password is returned. A
+   * support analyst holds no standing access, so their invite stays pending
+   * until their first support grant is issued.
+   *
+   * An older backend without POST /staff (404) still provisions a Platform
+   * Operator through POST /admin/users, which returns a one-time temporary
+   * password instead of sending an invitation.
+   */
   async inviteStaff(input: InviteStaffInput) {
-    const result = await post<BackendProvisionedUser>("/admin/users", {
-      email: input.email.trim(),
-      fullName: input.name.trim(),
+    const name = input.name.trim();
+    const email = input.email.trim();
+    const role = STAFF_ROLES.find(item => item.value === input.role);
+
+    const result = legacyStaffRoutes
+      ? null
+      : await post<{ staff: BackendStaff }>("/staff", {
+          name,
+          email,
+          role: input.role,
+          reason: input.reason.trim()
+        });
+
+    if (result?.ok) {
+      const created = result.body?.staff;
+      const snapshot = await buildSnapshot();
+      const staff =
+        snapshot.staff.find(item => item.id === created?.id) ??
+        mapStaff({
+          id: created?.id ?? "",
+          userId: created?.userId ?? "",
+          name: created?.name ?? name,
+          email: created?.email ?? email,
+          role: created?.role ?? input.role,
+          scope: created?.scope ?? role?.scope ?? "All tenants",
+          status: created?.status ?? "Invited",
+          lastAccess: created?.lastAccess ?? null,
+          privileged: created?.privileged ?? Boolean(role?.privileged)
+        });
+      return { ok: true, snapshot, data: { staff } };
+    }
+
+    if (result && result.status !== 404) return toFailure(result);
+
+    // The staff roster route does not exist on this backend.
+    legacyStaffRoutes = true;
+    if (input.role !== "admin") {
+      return failure(
+        "server_error",
+        `${role?.label ?? input.role} accounts cannot be invited until the backend exposes the staff roster. Only a Platform Operator can be provisioned here.`
+      );
+    }
+    const provisioned = await post<BackendProvisionedUser>("/admin/users", {
+      email,
+      fullName: name,
       role: "admin",
       scopeType: "platform"
     });
-    if (!result.ok) return toFailure(result);
+    if (!provisioned.ok) return toFailure(provisioned);
     const staff: StaffMember = {
-      id: result.body.user.id,
-      name: input.name.trim(),
-      email: input.email.trim(),
-      role: input.role,
-      scope: input.scope,
+      id: provisioned.body.user.id,
+      name,
+      email,
+      role: staffRoleLabel("admin"),
+      roleKey: "admin",
+      scope: "All tenants",
       status: "Invited",
       lastAccess: "Never",
       privileged: true,
-      tempPassword: result.body.tempPassword
+      tempPassword: provisioned.body.tempPassword
     };
     return ok({ staff });
   },
 
-  async transitionStaff({ id, transition }: StaffTransitionInput) {
-    const action = transition === "Restore" ? "unsuspend" : "suspend";
-    const result = await post<unknown>(`/admin/users/${encodeURIComponent(id)}/${action}`);
+  /**
+   * Suspend or restore a staff member (POST /staff/{id}/transitions).
+   * Suspending also revokes their active support grants. The backend refuses
+   * to suspend the final active Platform Operator (409).
+   */
+  async transitionStaff({ id, transition, reason }: StaffTransitionInput) {
+    if (legacyStaffRoutes) {
+      const action = transition === "Restore" ? "unsuspend" : "suspend";
+      const legacy = await post<unknown>(`/admin/users/${encodeURIComponent(id)}/${action}`);
+      if (!legacy.ok) return toFailure(legacy);
+      return ok(undefined);
+    }
+    const result = await post<{ staff: BackendStaff }>(`/staff/${encodeURIComponent(id)}/transitions`, {
+      transition,
+      reason
+    });
     if (!result.ok) return toFailure(result);
     return ok(undefined);
   },
 
-  createSupportGrant(_input: CreateSupportGrantInput) {
-    // A platform admin's grants are platform-scoped and single-role, so a
-    // time-limited organisation-scoped support grant cannot be expressed yet.
-    return notAvailable<{ grant: SupportGrant }>("Time-limited support access");
+  /**
+   * Issue a read-only, time-limited support grant (POST /support-grants).
+   * Only an active support analyst can hold one (400 otherwise), never into
+   * a suspended enterprise (409) or for a suspended staff member (409).
+   */
+  async createSupportGrant(input: CreateSupportGrantInput) {
+    const result = await post<{ supportGrant: BackendSupportGrant }>("/support-grants", {
+      staffId: input.staffId,
+      organisationId: input.enterpriseId,
+      durationHours: input.duration,
+      reason: input.reason.trim()
+    });
+    if (!result.ok) return toFailure(result);
+
+    const created = result.body?.supportGrant;
+    const snapshot = await buildSnapshot();
+    const grant =
+      snapshot.supportGrants.find(item => item.id === created?.id) ??
+      mapSupportGrant(
+        {
+          id: created?.id ?? "",
+          staffId: created?.staffId ?? input.staffId,
+          staffName:
+            created?.staffName ?? snapshot.staff.find(item => item.id === input.staffId)?.name ?? null,
+          organisationId: created?.organisationId ?? input.enterpriseId,
+          organisationName:
+            created?.organisationName ??
+            snapshot.enterprises.find(item => item.id === input.enterpriseId)?.name ??
+            null,
+          mode: created?.mode ?? "Read only",
+          status: created?.status ?? "Active",
+          reason: created?.reason ?? input.reason.trim(),
+          grantedAt: created?.grantedAt ?? new Date().toISOString(),
+          expiresAt:
+            created?.expiresAt ?? new Date(Date.now() + input.duration * 3600000).toISOString(),
+          revokedAt: created?.revokedAt ?? null
+        },
+        []
+      );
+    return { ok: true, snapshot, data: { grant } };
+  },
+
+  /**
+   * End a support grant early (POST /support-grants/{id}/revoke). It takes
+   * effect on the analyst's next request. A grant that was already revoked
+   * or already lapsed on its own is refused (409).
+   */
+  async revokeSupportGrant({ id, reason }: RevokeSupportGrantInput) {
+    const result = await post<{ supportGrant: BackendSupportGrant }>(
+      `/support-grants/${encodeURIComponent(id)}/revoke`,
+      { reason: reason.trim() }
+    );
+    if (!result.ok) return toFailure(result);
+
+    const revoked = result.body?.supportGrant;
+    const snapshot = await buildSnapshot();
+    const grant =
+      snapshot.supportGrants.find(item => item.id === id) ??
+      (revoked ? mapSupportGrant(revoked, []) : undefined);
+    if (!grant) return failure("not_found", "That support grant is no longer in the picture.", snapshot);
+    return { ok: true, snapshot, data: { grant } };
   },
 
   runDeviceDiagnostic(_id: string) {
@@ -1235,8 +1573,29 @@ export const httpAdapter: OperationsApi = {
     return ok(undefined);
   },
 
+  /** POST /access-reviews takes no body and answers with the attestation written. */
   async completeAccessReview() {
-    return ok(undefined);
+    const result = await post<{ accessReview: BackendAccessReview }>("/access-reviews");
+    if (!result.ok) return toFailure(result);
+
+    const recorded = result.body?.accessReview;
+    const snapshot = await buildSnapshot();
+    const review =
+      snapshot.accessReviews.find(item => item.id === recorded?.id) ??
+      mapAccessReview(
+        recorded ?? {
+          id: "",
+          at: new Date().toISOString(),
+          reviewerId: "",
+          reviewerName: snapshot.currentOperator.name,
+          snapshot: {
+            staffByRole: {},
+            privilegedCount: snapshot.staff.filter(item => item.privileged && item.status === "Active").length,
+            activeSupportGrants: snapshot.supportGrants.filter(item => item.status === "Active").length
+          }
+        }
+      );
+    return { ok: true, snapshot, data: { review } };
   },
 
   async recordExport(_kind: ExportKind) {

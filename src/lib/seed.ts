@@ -413,6 +413,7 @@ export const SEED: Snapshot = {
       name: "Lami Abdullahi",
       email: "l••••@rana54.com",
       role: "Platform Operator",
+      roleKey: "admin",
       scope: "All tenants",
       status: "Active",
       lastAccess: "6 min ago",
@@ -423,7 +424,8 @@ export const SEED: Snapshot = {
       name: "Tunde Cole",
       email: "t••••@rana54.com",
       role: "Field Operations",
-      scope: "Nigeria",
+      roleKey: "field_operations",
+      scope: "All tenants",
       status: "Active",
       lastAccess: "42 min ago",
       privileged: false
@@ -433,6 +435,7 @@ export const SEED: Snapshot = {
       name: "Zainab Ibrahim",
       email: "z••••@rana54.com",
       role: "Data Operations",
+      roleKey: "data_operations",
       scope: "All tenants",
       status: "Active",
       lastAccess: "2 hr ago",
@@ -443,6 +446,7 @@ export const SEED: Snapshot = {
       name: "Kwame Asare",
       email: "k••••@rana54.com",
       role: "Support Analyst",
+      roleKey: "support_analyst",
       scope: "Assigned tenants",
       status: "Active",
       lastAccess: "Yesterday",
@@ -457,16 +461,49 @@ export const SEED: Snapshot = {
       mode: "Read only",
       expires: "Today, 18:00",
       reason: "Investigate offline gateway",
-      status: "Active"
+      status: "Active",
+      staffId: "STF-SUP-021",
+      enterpriseId: "ENT-NRB-0031",
+      granted: "Today, 10:00"
     },
     {
       id: "GRANT-0411",
-      staff: "Tunde Cole",
+      staff: "Kwame Asare",
       enterprise: "Sahel Foods Ltd.",
       mode: "Read only",
       expires: "27 Aug, 17:00",
       reason: "Verify site acceptance",
-      status: "Expired"
+      status: "Expired",
+      staffId: "STF-SUP-021",
+      enterpriseId: "ENT-SHL-0018",
+      granted: "27 Aug, 09:00"
+    }
+  ],
+  accessReviews: [
+    {
+      id: "REV-0031",
+      at: "21 Aug, 09:30",
+      reviewer: "Lami Abdullahi",
+      staffByRole: {
+        "Platform Operator": 1,
+        "Field Operations": 1,
+        "Data Operations": 1,
+        "Support Analyst": 1
+      },
+      privilegedCount: 2,
+      activeSupportGrants: 1
+    },
+    {
+      id: "REV-0027",
+      at: "24 Jul, 10:05",
+      reviewer: "Lami Abdullahi",
+      staffByRole: {
+        "Platform Operator": 1,
+        "Field Operations": 1,
+        "Data Operations": 1
+      },
+      privilegedCount: 2,
+      activeSupportGrants: 0
     }
   ],
   services: [

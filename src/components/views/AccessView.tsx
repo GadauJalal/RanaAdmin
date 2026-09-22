@@ -15,6 +15,7 @@ import {
   Tabs
 } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
+import { pluralise } from "@/lib/format";
 import { useSnapshot, useWorkspace } from "@/providers/workspace-provider";
 
 /** Rana54 staff accounts, time-limited tenant support, and privileged access review. */
@@ -40,13 +41,15 @@ export function AccessView() {
       )
   );
   const privileged = snapshot.staff.filter(item => item.privileged && item.status === "Active");
+  const activeGrants = snapshot.supportGrants.filter(item => item.status === "Active").length;
+  const reviews = snapshot.accessReviews;
 
   function completeReview() {
     void run(() => api.completeAccessReview(), {
       failureTitle: "Review could not be recorded",
-      success: () => ({
+      success: ({ review }) => ({
         title: "Access review recorded",
-        detail: "The review result was appended to audit history."
+        detail: `${review.privilegedCount} privileged ${pluralise(review.privilegedCount, "account")} and ${review.activeSupportGrants} active support ${pluralise(review.activeSupportGrants, "grant")} attested at ${review.at}.`
       })
     });
   }
@@ -160,11 +163,12 @@ export function AccessView() {
                   <th>Expiry</th>
                   <th>Reason</th>
                   <th>Status</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
                 {grants.map(grant => (
-                  <tr key={grant.id}>
+                  <tr key={grant.id} data-grant-id={grant.id}>
                     <td className="row-id">{grant.id}</td>
                     <td>{grant.staff}</td>
                     <td>{grant.enterprise}</td>
@@ -175,6 +179,23 @@ export function AccessView() {
                     <td>{grant.reason}</td>
                     <td>
                       <Chip>{grant.status}</Chip>
+                    </td>
+                    <td>
+                      <div className="actions-cell">
+                        <button
+                          type="button"
+                          className="btn btn-small btn-secondary"
+                          disabled={grant.status !== "Active"}
+                          title={
+                            grant.status === "Active"
+                              ? "End this support session now"
+                              : `A ${String(grant.status).toLowerCase()} grant cannot be revoked`
+                          }
+                          onClick={() => openOverlay({ kind: "revoke-grant", id: grant.id })}
+                        >
+                          Revoke
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -195,7 +216,7 @@ export function AccessView() {
         <div className="grid equal">
           <Panel
             title="Privileged access review"
-            description="Confirm every cross-tenant operator remains appropriate"
+            description={`Confirm every cross-tenant operator remains appropriate. ${activeGrants} active support ${pluralise(activeGrants, "grant")} right now.`}
           >
             <div className="panel-body">
               <div className="work-list">
@@ -210,7 +231,7 @@ export function AccessView() {
                         {person.role} · {person.scope}
                       </small>
                     </span>
-                    <Chip>Review due</Chip>
+                    <Chip>{reviews.length ? `Last reviewed ${reviews[0].at}` : "Review due"}</Chip>
                   </div>
                 ))}
               </div>
@@ -222,6 +243,50 @@ export function AccessView() {
               >
                 Complete review
               </button>
+            </div>
+          </Panel>
+
+          <Panel
+            title="Review history"
+            description="Immutable attestations, newest first, with the picture at that moment"
+          >
+            <div className="panel-body">
+              {reviews.length ? (
+                <div className="work-list">
+                  {reviews.map(review => (
+                    <div className="work-item" key={review.id} data-review-id={review.id}>
+                      <span className="work-icon">
+                        <Icon name="check" />
+                      </span>
+                      <span>
+                        <strong>
+                          {review.at} · {review.reviewer}
+                        </strong>
+                        <small>
+                          {review.privilegedCount} privileged{" "}
+                          {pluralise(review.privilegedCount, "account")} ·{" "}
+                          {review.activeSupportGrants} active support{" "}
+                          {pluralise(review.activeSupportGrants, "grant")}
+                        </small>
+                        <small>
+                          {Object.entries(review.staffByRole).length
+                            ? Object.entries(review.staffByRole)
+                                .map(([role, count]) => `${count} ${role}`)
+                                .join(" · ")
+                            : "No staff counted"}
+                        </small>
+                      </span>
+                      <Chip>Recorded</Chip>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <EmptyState
+                  icon="shield"
+                  title="No access review recorded yet"
+                  description="Complete a review to record the first attestation."
+                />
+              )}
             </div>
           </Panel>
 
@@ -247,6 +312,16 @@ export function AccessView() {
                     <strong>Expiring grants</strong>
                     <small>
                       Every tenant support grant has a named reason and automatic expiry.
+                    </small>
+                  </div>
+                </div>
+                <div className="check-row">
+                  <Icon name="check" />
+                  <div>
+                    <strong>Support Analysts hold no standing access</strong>
+                    <small>
+                      Every read into a tenant goes through a time-limited grant; suspending the
+                      analyst or the enterprise revokes it at once.
                     </small>
                   </div>
                 </div>

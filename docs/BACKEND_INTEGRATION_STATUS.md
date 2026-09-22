@@ -1,7 +1,9 @@
 # RanaAdmin (Network Operations) backend integration status
 
 _Assessed against the Rana54 staging API (`https://staging.api.rana54.com`,
-Swagger at `/api/docs`). Updated 2026-09-16 for installer onboarding, device
+Swagger at `/api/docs`). Updated 2026-09-22 for the staff roster and roles,
+support grants, access reviews and enterprise suspension (the 2026-09-20
+handover); before that 2026-09-16 for installer onboarding, device
 registration, the staff checklist, job unblock, site lifecycle and the
 notification inbox._
 
@@ -15,11 +17,57 @@ endpoints the console boots from, so the live adapter
 
 - `GET /organisations`, `GET /sites`, `GET /devices`, `GET /jobs`,
   `GET /site-requests`, `GET /audit` (each paged, `limit` up to 200), plus
+- `GET /staff`, `GET /support-grants`, `GET /access-reviews` (the Access
+  page; `StaffManage`), plus
 - `GET /me`, `GET /admin/users`, `GET /installers`, `GET /health`.
 
 Every list is read tolerantly: a missing permission (`AdminJobRead`,
-`AuditRead`, `OrganisationManage`, `AdminDeviceService`) or an older backend
-empties that one collection instead of failing the console.
+`AuditRead`, `OrganisationManage`, `AdminDeviceService`, `StaffManage`) or an
+older backend empties that one collection instead of failing the console. If
+`GET /staff` answers 404 (a backend older than 2026-09-20) the roster falls
+back to `GET /admin/users` and staff writes fall back to the platform user
+routes (invite for Platform Operators only).
+
+### Access: staff, support grants, access reviews
+- **Rana54 staff** are the four platform roles `admin` (shown as "Platform
+  Operator"), `data_operations`, `field_operations` and `support_analyst`.
+  Inviting one (`POST /staff`) sends an activation email; no temporary
+  password is returned. The scope is derived by the backend ("All tenants",
+  or "Assigned tenants" for a support analyst).
+- **A Support Analyst holds no standing access.** Every read into a tenant
+  goes through a read-only, time-limited support grant (`POST /support-grants`,
+  2, 4, 8 or 24 hours). The analyst cannot accept their own invitation until
+  the first grant exists, so their "Invited" state legitimately waits for it.
+  Only a support analyst can hold a grant (400 otherwise); the grant modal
+  lists analysts only. Revoking (`POST /support-grants/{id}/revoke`) takes
+  effect on the analyst's next request; a grant that already expired or was
+  already revoked is refused (409), so the Revoke action is enabled only while
+  the grant is Active.
+- **Suspending a staff member** (`POST /staff/{id}/transitions`) revokes their
+  active grants; the final active Platform Operator cannot be suspended (409
+  `final_platform_operator`).
+- **Access review** (`POST /access-reviews`, no body) records an immutable
+  attestation with a snapshot of staff by role, privileged count and active
+  grants; the history (`GET /access-reviews`) shows on **Access > Access
+  review**.
+
+### Enterprise suspension
+- `GET /organisations` rows carry `status` (`suspended | onboarding | active`)
+  and `suspendedAt`; the enterprise card and drawer show the backend status
+  and "Suspended since". The console's site-based derivation is only a
+  fallback when `status` is absent.
+- `POST /organisations/{id}/transitions` (`Suspend | Restore`) suspends or
+  restores an enterprise. Suspension revokes every Rana54 support grant into
+  it and locks out its users on their next request; meter data keeps flowing.
+  The reason lands on the organisation's own audit log and is visible to it
+  once restored. "Provision site" and "Support access" are hidden for a
+  suspended enterprise. 409 `enterprise_already_suspended` /
+  `enterprise_not_suspended` when the transition changes nothing.
+- Every 409 code from this slice (`final_platform_operator`,
+  `staff_suspended`, `enterprise_suspended`, `enterprise_already_suspended`,
+  `enterprise_not_suspended`, `support_grant_already_revoked`,
+  `support_grant_expired`) is mapped to a readable toast in the live adapter's
+  `toFailure`; the machine string is never shown raw.
 
 ### Site creation, end to end
 1. An organisation administrator submits a site request from the Organization
@@ -43,8 +91,18 @@ empties that one collection instead of failing the console.
 ### Wired
 - **Enterprises, sites, site requests, jobs, devices, audit** via the list
   endpoints above.
-- **Staff / access** via `GET /admin/users` and the admin mutations
-  (`POST /admin/users`, `.../invite`, `.../suspend`, `.../unsuspend`).
+- **Staff roster** via `GET /staff`, **staff invite** via `POST /staff`
+  (four roles, mandatory reason, activation email), **suspend / restore** via
+  `POST /staff/{id}/transitions`. `POST /admin/users` now accepts only
+  `role: admin` and is used solely as the fallback on an older backend.
+- **Support grants** via `GET /support-grants`, `POST /support-grants`
+  (support analysts only, 2/4/8/24 hours, always read only) and
+  `POST /support-grants/{id}/revoke` (Access > Support grants, and the staff
+  record).
+- **Access reviews** via `GET /access-reviews` and `POST /access-reviews`
+  (Access > Access review, with the history list).
+- **Enterprise suspend / restore** via `POST /organisations/{id}/transitions`,
+  with `status` and `suspendedAt` read from `GET /organisations`.
 - **Installer roster** via `GET /installers`, `POST /installers` (**Field
   Operations > Installers > Add installer**) and `POST /installers/{id}/transitions`.
 - **Devices** via `GET /devices` and `POST /admin/sites/{siteId}/devices`
@@ -67,15 +125,18 @@ empties that one collection instead of failing the console.
 ### Still missing on the backend
 | Console area | Needs | Exists today? |
 | --- | --- | --- |
-| Incidents | the whole `/incidents` subsystem | No, not modelled at all |
-| Enterprise suspend / reactivate | an organisation lifecycle endpoint | No |
-| Support grants | time-limited org-scoped grants for platform staff | No (grants are single-role) |
-| Platform staff roles | Field Operations / Data Operations / Support Analyst | No, `Admin` only |
+| Incidents | the whole `/incidents` subsystem | No, not modelled at all (scope doc §5.5) |
 | Device diagnostics, firmware, heartbeat | per-device telemetry | No (only certification state and interval) |
+| Reissue an enterprise admin invite | `POST /enterprises/{id}/admin-invitations` | Not built: `createOrganisation` creates no admin user, so there is nothing to reissue to. The console's "Reissue invite" only works for an administrator provisioned from this console (`POST /admin/users/{id}/invite`) |
+| Changing a staff member's role | a role mutation on `/staff/{id}` | No, the only staff mutations are create, suspend and restore |
+| Regional staff scope | a "region" scope for Field Operations | No, `field_operations` reaches every tenant (scope doc §5.3b) |
+| Enterprise "Needs attention" status | a fourth derived state on `GET /organisations` rows | Deliberately not returned; a client-side or future concern |
 | Enterprise region / products / first admin name | fields on the organisation | No, remembered in this browser only |
 | Job checklist on the list | `checklistItems` on `GET /jobs` rows | No, only on `GET /jobs/{id}` (the drawer reads it there) |
-| Staff grants UI | `POST /admin/users/{id}/grants` and `DELETE .../grants/{grantId}` | Endpoints exist; no console UI built yet |
 | Site lifecycle reason | a `reason` on `PATCH /sites/{id}/lifecycle-status` | No, the console's reason is confirmation-only |
+
+The permission sets behind the three new staff roles are provisional on the
+backend; the console gates nothing on the role name beyond the copy it shows.
 
 ### Contract-shape mismatches (fix when wiring, once lists exist)
 The prototype's `http-adapter` assumes a contract that differs from the real API:
@@ -95,8 +156,8 @@ The prototype's `http-adapter` assumes a contract that differs from the real API
 
 ## Recommendation
 
-Add `GET /snapshot` (or the individual platform-wide list endpoints above) and
-an incidents subsystem, then RanaAdmin can be wired the same way the
-Organization Admin app was (an env-gated server proxy mapping backend shapes to
-the workspace types). Until then it runs on demo data and is fully viewable
-without a backend.
+The remaining gaps are incidents, device telemetry and diagnostics, reissuing
+an enterprise administrator invite, changing a staff member's role and a
+regional staff scope. Everything else the console shows is read from and
+written to the backend; the demo adapter (`NEXT_PUBLIC_DATA_SOURCE=mock`)
+stays fully viewable without a backend.

@@ -24,6 +24,8 @@ export interface Enterprise {
   sites: number;
   liveSites: number;
   lastActivity: string;
+  /** When the account was suspended, formatted; present only while suspended. */
+  suspendedSince?: string;
   /** Live backend only: the provisioned first administrator's user id. */
   adminUserId?: string;
   /**
@@ -149,7 +151,10 @@ export interface StaffMember {
   id: string;
   name: string;
   email: string;
+  /** Display label, e.g. "Platform Operator". */
   role: string;
+  /** The platform's wire value for the role (admin, support_analyst, ...), when known. */
+  roleKey?: string;
   scope: string;
   status: StaffStatus | string;
   lastAccess: string;
@@ -168,6 +173,27 @@ export interface SupportGrant {
   expires: string;
   reason: string;
   status: SupportGrantStatus | string;
+  /** The staff roster id the grant belongs to, when known. */
+  staffId?: string;
+  /** The enterprise account id the grant reaches into, when known. */
+  enterpriseId?: string;
+  /** When the grant was issued, formatted. */
+  granted?: string;
+}
+
+/**
+ * An immutable attestation that privileged access was reviewed, with the
+ * picture at that moment.
+ */
+export interface AccessReview {
+  id: string;
+  /** When the review was recorded, formatted. */
+  at: string;
+  reviewer: string;
+  /** Staff count per role label, e.g. { "Platform Operator": 2 }. */
+  staffByRole: Record<string, number>;
+  privilegedCount: number;
+  activeSupportGrants: number;
 }
 
 export type ServiceStatus = "Operational" | "Degraded" | "Down";
@@ -211,6 +237,8 @@ export interface Snapshot {
   incidents: Incident[];
   staff: StaffMember[];
   supportGrants: SupportGrant[];
+  /** Privileged access reviews, newest first. */
+  accessReviews: AccessReview[];
   services: PlatformService[];
   audit: AuditEvent[];
 }
@@ -225,6 +253,7 @@ export const SNAPSHOT_COLLECTIONS = [
   "incidents",
   "staff",
   "supportGrants",
+  "accessReviews",
   "services",
   "audit"
 ] as const;
