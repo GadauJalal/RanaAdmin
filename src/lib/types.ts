@@ -26,15 +26,17 @@ export interface Enterprise {
   lastActivity: string;
   /** When the account was suspended, formatted; present only while suspended. */
   suspendedSince?: string;
-  /** Live backend only: the provisioned first administrator's user id. */
+  /** The first administrator's user id, returned once when the enterprise was created. */
   adminUserId?: string;
   /**
-   * Live backend only: the one-time temporary password issued when the first
-   * administrator was provisioned. Held in memory for this session only and
-   * never persisted, matching the backend (it is shown exactly once).
+   * The first administrator's account state as last reported by the platform:
+   * "Invited" until they open their activation email and set a password, then
+   * "Active" (or "Suspended"). Absent when the platform has not reported it.
    */
-  adminTempPassword?: string;
+  adminStatus?: EnterpriseAdminStatus | string;
 }
+
+export type EnterpriseAdminStatus = "Invited" | "Active" | "Suspended";
 
 export type PlatformSiteStatus = "Provisioned" | "Active" | "Decommissioned";
 

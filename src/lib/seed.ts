@@ -23,7 +23,9 @@ export const SEED: Snapshot = {
       products: ["Energy workspace", "dMRV reports"],
       sites: 8,
       liveSites: 7,
-      lastActivity: "12 min ago"
+      lastActivity: "12 min ago",
+      adminUserId: "USR-SHL-0001",
+      adminStatus: "Active"
     },
     {
       id: "ENT-ARD-0074",
@@ -36,7 +38,9 @@ export const SEED: Snapshot = {
       products: ["Energy workspace"],
       sites: 3,
       liveSites: 1,
-      lastActivity: "1 hr ago"
+      lastActivity: "1 hr ago",
+      adminUserId: "USR-ARD-0001",
+      adminStatus: "Invited"
     },
     {
       id: "ENT-NRB-0031",
@@ -49,7 +53,9 @@ export const SEED: Snapshot = {
       products: ["Energy workspace", "dMRV reports"],
       sites: 5,
       liveSites: 3,
-      lastActivity: "Yesterday"
+      lastActivity: "Yesterday",
+      adminUserId: "USR-NRB-0001",
+      adminStatus: "Active"
     },
     {
       id: "ENT-KVL-0062",
@@ -62,7 +68,9 @@ export const SEED: Snapshot = {
       products: ["Energy workspace"],
       sites: 4,
       liveSites: 4,
-      lastActivity: "34 min ago"
+      lastActivity: "34 min ago",
+      adminUserId: "USR-KVL-0001",
+      adminStatus: "Active"
     }
   ],
   sites: [

@@ -12,9 +12,9 @@
  * missing permission or an older backend empties one collection instead of
  * failing the whole console.
  *
- * Writes call the real workflow endpoints: create an enterprise and provision
- * its first administrator (whose one-time temporary password is surfaced once
- * and never persisted), suspend or restore an enterprise, provision a site and
+ * Writes call the real workflow endpoints: create an enterprise (which invites
+ * its first administrator by activation email in the same call) and resend
+ * that invitation, suspend or restore an enterprise, provision a site and
  * move it through its lifecycle, register a device, decide a site request,
  * onboard installers, create, reassign, link, unblock, evidence and accept
  * jobs, invite, suspend or restore staff and installers, issue and revoke
@@ -54,6 +54,7 @@ import {
   type CreateJobInput,
   type CreateSiteInput,
   type CreateSupportGrantInput,
+  type EnterpriseAdmin,
   type EnterpriseTransitionInput,
   type ExportKind,
   type FailureCode,
@@ -121,6 +122,19 @@ interface BackendOrganisation {
   /** Derived by the backend on every read; absent on an older backend. */
   status?: "suspended" | "onboarding" | "active" | string;
   suspendedAt?: string | null;
+  /** POST /admin/organisations only: the first administrator invited by the same call. */
+  adminUserId?: string;
+}
+
+/** GET /organisations/{orgId}/users row: an organisation's own staff member. */
+interface BackendOrgUser {
+  id: string;
+  email: string;
+  fullName: string | null;
+  role: string;
+  status: "pending_activation" | "active" | "suspended" | string;
+  scopes?: { scopeType: string; scopeId?: string | null }[];
+  scopeLabel?: string;
 }
 
 /** GET /staff row: the Rana54 roster, with the wire role and derived scope. */
@@ -459,13 +473,10 @@ function toFailure(outcome: { status: number; code: string; message: string }, s
 
 const ENTERPRISES_KEY = "ranaops.live.enterprises";
 
-/** Temporary passwords live only in memory for this session (shown once). */
-const sessionPasswords = new Map<string, string>();
-
 /**
  * The console-side details of an enterprise the backend has no field for
- * (region, products, the first administrator's name and user id). The
- * organisation itself is always read from the backend list.
+ * (region, products, the first administrator's name, user id and last known
+ * state). The organisation itself is always read from the backend list.
  */
 function storedEnterprises(): Enterprise[] {
   if (typeof window === "undefined") return [];
@@ -480,9 +491,7 @@ function storedEnterprises(): Enterprise[] {
 function storeEnterprises(list: Enterprise[]) {
   if (typeof window === "undefined") return;
   try {
-    // Never persist the temporary password.
-    const safe = list.map(({ adminTempPassword: _omit, ...rest }) => rest);
-    window.localStorage.setItem(ENTERPRISES_KEY, JSON.stringify(safe));
+    window.localStorage.setItem(ENTERPRISES_KEY, JSON.stringify(list));
   } catch {
     /* Storage unavailable: the record survives for this session only. */
   }
@@ -491,6 +500,47 @@ function storeEnterprises(list: Enterprise[]) {
 function rememberEnterprise(enterprise: Enterprise) {
   const rest = storedEnterprises().filter(item => item.id !== enterprise.id);
   storeEnterprises([enterprise, ...rest]);
+}
+
+const ORG_USER_STATUS: Record<string, string> = {
+  pending_activation: "Invited",
+  active: "Active",
+  suspended: "Suspended"
+};
+
+function mapOrgUserStatus(status: string | undefined): string {
+  return status ? (ORG_USER_STATUS[status] ?? capitalise(status)) : "Invited";
+}
+
+/** An organisation-wide grant (no scope rows, or one naming the organisation). */
+function isOrganisationWide(user: BackendOrgUser): boolean {
+  return !user.scopes?.length || user.scopes.some(scope => scope.scopeType === "organisation");
+}
+
+/**
+ * The enterprise's first administrator is not a stored field: it is whoever
+ * holds the organisation-wide super_admin role (GET /organisations/{id}/users).
+ * A pending or active holder is preferred over a suspended one. A list that
+ * could not be read is reported as such, not as "no administrator".
+ */
+async function findOrganisationAdmin(
+  orgId: string
+): Promise<{ ok: true; admin: BackendOrgUser | null } | { ok: false; status: number; code: string; message: string }> {
+  const result = await request<unknown>(`/organisations/${encodeURIComponent(orgId)}/users`);
+  if (!result.ok) return result;
+  const admins = asList<BackendOrgUser>(result, "users").filter(
+    user => user.role === "super_admin" && isOrganisationWide(user)
+  );
+  return { ok: true, admin: admins.find(user => user.status !== "suspended") ?? admins[0] ?? null };
+}
+
+function mapEnterpriseAdmin(user: BackendOrgUser): EnterpriseAdmin {
+  return {
+    userId: user.id,
+    name: user.fullName,
+    email: user.email,
+    status: mapOrgUserStatus(user.status)
+  };
 }
 
 /**
@@ -674,7 +724,6 @@ function mapEnterprise(
     100,
     20 + (extra?.adminUserId ? 20 : 0) + (orgSites.length ? 30 : 0) + (liveSites ? 30 : 0)
   );
-  const password = sessionPasswords.get(org.id);
   // The backend derives the status on every read; an older backend without
   // the field falls back to the console's own site-based derivation.
   const status = org.status
@@ -696,7 +745,7 @@ function mapEnterprise(
     lastActivity: when(org.createdAt, "Not reported"),
     ...(status === "Suspended" ? { suspendedSince: when(org.suspendedAt, "Not recorded") } : null),
     adminUserId: extra?.adminUserId,
-    ...(password ? { adminTempPassword: password } : null)
+    ...(extra?.adminStatus ? { adminStatus: extra.adminStatus } : null)
   };
 }
 
@@ -1025,53 +1074,84 @@ export const httpAdapter: OperationsApi = {
   },
 
   /**
-   * Create the organisation, then provision its first administrator. The
-   * backend returns that administrator's temporary password exactly once;
-   * it is attached to the returned enterprise for this session only.
+   * Create the organisation (POST /admin/organisations). The same call
+   * invites its first administrator: an organisation-wide super_admin who
+   * receives an activation email. There is no temporary password.
+   *
+   * The call is not transactional. A 409 "An organisation with email ..."
+   * means nothing was created; a 409 "A user with this email already exists"
+   * means the organisation exists but the invite could not claim that
+   * address. Any other failure after creation leaves the organisation in
+   * place too, so the picture is re-read and the record kept when it shows.
    */
   async createEnterprise(input: CreateEnterpriseInput) {
+    const name = input.name.trim();
+    const adminName = input.adminName.trim();
+    const adminEmail = input.adminEmail.trim();
+    const contactEmail = input.email?.trim() || adminEmail;
+
     const created = await post<BackendOrganisation>("/admin/organisations", {
-      name: input.name.trim(),
-      email: input.adminEmail.trim(),
-      phone: input.phone?.trim() || undefined
+      name,
+      email: contactEmail,
+      phone: input.phone?.trim() || undefined,
+      adminName,
+      adminEmail
     });
-    if (!created.ok) return toFailure(created);
 
     const enterprise: Enterprise = {
-      id: created.body.id,
-      name: created.body.name,
+      id: created.ok ? created.body.id : "",
+      name: created.ok ? created.body.name || name : name,
       region: input.region,
       status: input.status || "Onboarding",
       readiness: 20,
-      adminName: input.adminName.trim(),
-      adminEmail: input.adminEmail.trim(),
+      adminName,
+      adminEmail,
       products: input.products.length ? input.products : ["Energy workspace"],
       sites: 0,
       liveSites: 0,
       lastActivity: "Just now"
     };
-    rememberEnterprise(enterprise);
 
-    const provisioned = await post<BackendProvisionedUser>("/admin/users", {
-      email: input.adminEmail.trim(),
-      fullName: input.adminName.trim(),
-      role: "super_admin",
-      scopeType: "organisation",
-      scopeId: enterprise.id
-    });
-    if (!provisioned.ok) {
+    if (!created.ok) {
+      if (created.status === 409 && /^An organisation with email/i.test(created.message)) {
+        return failure(
+          "invalid_input",
+          `${created.message.replace(/\.?\s*$/, "")}. Nothing was created; use a different organisation contact email.`
+        );
+      }
+
+      // The organisation may exist even though the call failed. Only the
+      // backend list can say, so read it before deciding what to tell the operator.
+      const listed = asList<BackendOrganisation>(
+        await request<unknown>(`/organisations?limit=${PAGE}`),
+        "organisations"
+      );
+      const existing = listed.find(
+        org => (org.email ?? "").toLowerCase() === contactEmail.toLowerCase() && org.name === name
+      );
+      if (!existing) return toFailure(created);
+
+      enterprise.id = existing.id;
+      rememberEnterprise(enterprise);
+      const snapshot = await buildSnapshot();
+      if (created.status === 409 && /A user with this email already exists/i.test(created.message)) {
+        return failure(
+          "invalid_input",
+          `${name} was created, but ${adminEmail} already belongs to an existing account, so the administrator invitation could not be sent to it. Add the right person through Organization Admin, or use Resend invitation on the enterprise record once an administrator is listed.`,
+          snapshot
+        );
+      }
       return toFailure(
         {
-          ...provisioned,
-          message: `The enterprise was created, but its administrator could not be provisioned: ${provisioned.message}`
+          ...created,
+          message: `${name} was created, but its administrator invitation could not be sent: ${created.message} Use Resend invitation on the enterprise record.`
         },
-        await buildSnapshot()
+        snapshot
       );
     }
 
-    enterprise.adminUserId = provisioned.body.user.id;
-    enterprise.adminTempPassword = provisioned.body.tempPassword;
-    sessionPasswords.set(enterprise.id, provisioned.body.tempPassword);
+    enterprise.adminUserId = created.body.adminUserId;
+    enterprise.adminStatus = "Invited";
     rememberEnterprise(enterprise);
 
     const snapshot = await buildSnapshot();
@@ -1101,14 +1181,63 @@ export const httpAdapter: OperationsApi = {
     return { ok: true, snapshot, data: { enterprise } };
   },
 
+  /**
+   * Resend the first administrator's activation email
+   * (POST /organisations/{id}/users/{userId}/invite). The user id comes from
+   * the create response when the enterprise was created in this console;
+   * otherwise the organisation-wide super_admin is looked up.
+   */
   async reissueAdminInvite({ id }: ReissueAdminInviteInput) {
-    const enterprise = storedEnterprises().find(item => item.id === id);
-    if (!enterprise?.adminUserId) {
-      return failure("not_found", "This enterprise's administrator was not provisioned from this console.");
+    const remembered = storedEnterprises().find(item => item.id === id);
+    const invite = (userId: string) =>
+      post<void>(`/organisations/${encodeURIComponent(id)}/users/${encodeURIComponent(userId)}/invite`);
+
+    let admin: EnterpriseAdmin | null =
+      remembered?.adminUserId && remembered.adminEmail
+        ? {
+            userId: remembered.adminUserId,
+            name: remembered.adminName,
+            email: remembered.adminEmail,
+            status: remembered.adminStatus ?? "Invited"
+          }
+        : null;
+    let sent = admin ? await invite(admin.userId) : null;
+
+    // Nothing remembered, or the remembered id is stale: ask the organisation.
+    if (!admin || !sent || (!sent.ok && sent.status === 404)) {
+      const found = await findOrganisationAdmin(id);
+      if (!found.ok) return toFailure(found);
+      if (!found.admin) {
+        return failure(
+          "not_found",
+          "No organisation-wide administrator is listed for this enterprise, so there is no invitation to resend. Add one through Organization Admin."
+        );
+      }
+      admin = mapEnterpriseAdmin(found.admin);
+      sent = await invite(admin.userId);
     }
-    const sent = await post<void>(`/admin/users/${encodeURIComponent(enterprise.adminUserId)}/invite`);
     if (!sent.ok) return toFailure(sent);
-    return ok({ enterprise });
+
+    if (remembered) {
+      rememberEnterprise({
+        ...remembered,
+        adminUserId: admin.userId,
+        adminName: admin.name ?? remembered.adminName,
+        adminEmail: admin.email,
+        adminStatus: admin.status
+      });
+    }
+    const snapshot = await buildSnapshot();
+    const enterprise =
+      snapshot.enterprises.find(item => item.id === id) ??
+      mapEnterprise({ id, name: remembered?.name ?? id }, [], storedEnterprises());
+    return { ok: true, snapshot, data: { enterprise } };
+  },
+
+  /** The organisation-wide super_admin and their state, or null when none is listed. */
+  async getEnterpriseAdmin(enterpriseId: string) {
+    const found = await findOrganisationAdmin(enterpriseId);
+    return found.ok && found.admin ? mapEnterpriseAdmin(found.admin) : null;
   },
 
   /** Approve or return a site request. Approval is what creates the site. */

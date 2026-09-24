@@ -1,11 +1,12 @@
 # RanaAdmin (Network Operations) backend integration status
 
 _Assessed against the Rana54 staging API (`https://staging.api.rana54.com`,
-Swagger at `/api/docs`). Updated 2026-09-22 for the staff roster and roles,
-support grants, access reviews and enterprise suspension (the 2026-09-20
-handover); before that 2026-09-16 for installer onboarding, device
-registration, the staff checklist, job unblock, site lifecycle and the
-notification inbox._
+Swagger at `/api/docs`). Updated 2026-09-24 for organisation creation
+inviting its first administrator and for installers activating before their
+first job (the 2026-09-23 handover, sections 2 and 3); before that 2026-09-22
+for the staff roster and roles, support grants, access reviews and enterprise
+suspension, and 2026-09-16 for installer onboarding, device registration, the
+staff checklist, job unblock, site lifecycle and the notification inbox._
 
 ## Summary
 
@@ -50,6 +51,38 @@ routes (invite for Platform Operators only).
   attestation with a snapshot of staff by role, privileged count and active
   grants; the history (`GET /access-reviews`) shows on **Access > Access
   review**.
+
+### Enterprise creation and the first administrator
+- `POST /admin/organisations` now takes `adminName` and `adminEmail` alongside
+  `name`, `email` (the organisation's own contact address, validated and
+  stored separately; the New Enterprise modal defaults it to the admin email
+  when left blank), `phone` and `contractRef`, and invites the administrator
+  in the same call: an organisation-wide `super_admin` in
+  `pending_activation` with an activation email sent immediately. The
+  response carries `adminUserId`. The separate `POST /admin/users` call is
+  gone and **there is no temporary password**; the toast and the enterprise
+  record say "An activation email was sent to <adminEmail>".
+- The call is not transactional. The live adapter reads the two 409 cases by
+  message: "An organisation with email ... already exists" means nothing was
+  created (the toast says so); "A user with this email already exists" means
+  the organisation **was** created but the invite could not claim that
+  address, so the picture is reloaded (the new enterprise shows) and the
+  operator is pointed to Resend invitation or to adding the person through
+  Organization Admin. Any other failure re-reads `GET /organisations`; when
+  the organisation is listed, the record is kept and the snapshot reloaded.
+- **Resend invitation** calls `POST /organisations/{orgId}/users/{userId}/invite`
+  with the `adminUserId` from the create response, or, for an enterprise not
+  created in this console, looks the administrator up via
+  `GET /organisations/{orgId}/users` (role `super_admin`, organisation-wide).
+  The enterprise record reads the same list when it opens and shows the
+  administrator as "Invited, activation email sent" until the platform reports
+  them `active`.
+
+### Installers can sign in before their first job
+- `POST /installers` issues an inert grant at creation, so the activation
+  email works immediately and the installer can log in before any job exists;
+  the installer app shows an empty job list until a job is assigned. No roster
+  change was needed here; only the Add installer copy was corrected.
 
 ### Enterprise suspension
 - `GET /organisations` rows carry `status` (`suspended | onboarding | active`)
@@ -107,8 +140,10 @@ routes (invite for Platform Operators only).
   Operations > Installers > Add installer**) and `POST /installers/{id}/transitions`.
 - **Devices** via `GET /devices` and `POST /admin/sites/{siteId}/devices`
   (**Devices > Register device**; a duplicate serial is refused with 409).
-- **Workflow writes**: `POST /admin/organisations` + `POST /admin/users`
-  (enterprise + first administrator, temp password shown once),
+- **Workflow writes**: `POST /admin/organisations` (enterprise + first
+  administrator invited by activation email, `adminUserId` returned),
+  `POST /organisations/{orgId}/users/{userId}/invite` (Resend invitation, with
+  `GET /organisations/{orgId}/users` to find the administrator),
   `POST /admin/sites`, `PATCH /sites/{id}/lifecycle-status` (activate or
   decommission from the enterprise record), `POST /site-requests/{id}/decision`,
   `POST /jobs`, `/jobs/{id}/assignment`, `/gateway-link`,
@@ -127,11 +162,10 @@ routes (invite for Platform Operators only).
 | --- | --- | --- |
 | Incidents | the whole `/incidents` subsystem | No, not modelled at all (scope doc §5.5) |
 | Device diagnostics, firmware, heartbeat | per-device telemetry | No (only certification state and interval) |
-| Reissue an enterprise admin invite | `POST /enterprises/{id}/admin-invitations` | Not built: `createOrganisation` creates no admin user, so there is nothing to reissue to. The console's "Reissue invite" only works for an administrator provisioned from this console (`POST /admin/users/{id}/invite`) |
 | Changing a staff member's role | a role mutation on `/staff/{id}` | No, the only staff mutations are create, suspend and restore |
 | Regional staff scope | a "region" scope for Field Operations | No, `field_operations` reaches every tenant (scope doc §5.3b) |
 | Enterprise "Needs attention" status | a fourth derived state on `GET /organisations` rows | Deliberately not returned; a client-side or future concern |
-| Enterprise region / products / first admin name | fields on the organisation | No, remembered in this browser only |
+| Enterprise region / products | fields on the organisation | No, remembered in this browser only (the first administrator's name and state are now read from `GET /organisations/{orgId}/users`) |
 | Job checklist on the list | `checklistItems` on `GET /jobs` rows | No, only on `GET /jobs/{id}` (the drawer reads it there) |
 | Site lifecycle reason | a `reason` on `PATCH /sites/{id}/lifecycle-status` | No, the console's reason is confirmation-only |
 
@@ -156,8 +190,8 @@ The prototype's `http-adapter` assumes a contract that differs from the real API
 
 ## Recommendation
 
-The remaining gaps are incidents, device telemetry and diagnostics, reissuing
-an enterprise administrator invite, changing a staff member's role and a
-regional staff scope. Everything else the console shows is read from and
+The remaining gaps are incidents, device telemetry and diagnostics, changing
+a staff member's role and a regional staff scope. Everything else the console
+shows is read from and
 written to the backend; the demo adapter (`NEXT_PUBLIC_DATA_SOURCE=mock`)
 stays fully viewable without a backend.
