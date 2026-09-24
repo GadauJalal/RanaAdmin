@@ -183,10 +183,20 @@ export const mockAdapter: OperationsApi = {
     return commit(memory);
   },
 
+  /**
+   * Creating the enterprise invites its first administrator in the same step:
+   * an activation email, no temporary password. The organisation's own
+   * contact email is validated separately and falls back to the admin's.
+   */
   async createEnterprise(input: CreateEnterpriseInput) {
     const snapshot = draft();
     const id = `ENT-NEW-${suffix()}`;
-    const masked = maskEmail(input.adminEmail.trim());
+    const adminEmail = input.adminEmail.trim();
+    const contactEmail = input.email?.trim() || adminEmail;
+    if (!adminEmail.includes("@") || !contactEmail.includes("@")) {
+      return failure("invalid_input", "Both the organisation contact email and the administrator email must be valid addresses.");
+    }
+    const masked = maskEmail(adminEmail);
     const enterprise = {
       id,
       name: input.name.trim(),
@@ -198,7 +208,9 @@ export const mockAdapter: OperationsApi = {
       products: input.products.length ? input.products : ["Energy workspace"],
       sites: 0,
       liveSites: 0,
-      lastActivity: "Just now"
+      lastActivity: "Just now",
+      adminUserId: `USR-${suffix()}`,
+      adminStatus: "Invited"
     };
     snapshot.enterprises.unshift(enterprise);
     audit(
@@ -206,7 +218,7 @@ export const mockAdapter: OperationsApi = {
       "Enterprise account created",
       id,
       "Created",
-      `Initial administrator invitation issued to ${masked}`
+      `Initial administrator activation email sent to ${masked}`
     );
     return ok(snapshot, { enterprise });
   },
@@ -260,15 +272,34 @@ export const mockAdapter: OperationsApi = {
     const snapshot = draft();
     const enterprise = snapshot.enterprises.find(item => item.id === input.id);
     if (!enterprise) return failure("not_found", "That enterprise account no longer exists.");
+    if (!enterprise.adminName || !enterprise.adminEmail) {
+      return failure(
+        "not_found",
+        "No organisation-wide administrator is listed for this enterprise, so there is no invitation to resend. Add one through Organization Admin."
+      );
+    }
     enterprise.lastActivity = "Just now";
+    enterprise.adminUserId = enterprise.adminUserId ?? `USR-${suffix()}`;
+    if (enterprise.adminStatus !== "Active") enterprise.adminStatus = "Invited";
     audit(
       snapshot,
-      "Initial administrator invite reissued",
+      "Initial administrator invitation resent",
       enterprise.id,
-      "Invitation issued",
+      "Activation email sent",
       input.reason.trim()
     );
     return ok(snapshot, { enterprise });
+  },
+
+  async getEnterpriseAdmin(enterpriseId: string) {
+    const enterprise = read().enterprises.find(item => item.id === enterpriseId);
+    if (!enterprise?.adminName || !enterprise.adminEmail) return null;
+    return {
+      userId: enterprise.adminUserId ?? `USR-${enterprise.id}`,
+      name: enterprise.adminName,
+      email: enterprise.adminEmail,
+      status: enterprise.adminStatus ?? "Active"
+    };
   },
 
   async decideSiteRequest(input: SiteDecisionInput) {

@@ -16,6 +16,7 @@ import type {
   AccessReview,
   Device,
   Enterprise,
+  EnterpriseAdminStatus,
   Incident,
   Installer,
   Job,
@@ -73,11 +74,26 @@ export interface CreateEnterpriseInput {
   name: string;
   region: string;
   status: string;
+  /** The first administrator, invited by activation email in the same call. */
   adminName: string;
   adminEmail: string;
   products: string[];
+  /**
+   * The organisation's own contact address, validated and stored separately
+   * from the administrator's login email. Blank means "use the admin's email".
+   */
+  email?: string;
   /** Contact phone for the organisation record (the backend requires one). */
   phone?: string;
+}
+
+/** The enterprise's first administrator as the platform reports them. */
+export interface EnterpriseAdmin {
+  userId: string;
+  name: string | null;
+  email: string;
+  /** "Invited" until the activation email is used, then "Active" or "Suspended". */
+  status: EnterpriseAdminStatus | string;
 }
 
 export interface EnterpriseTransitionInput {
@@ -348,9 +364,19 @@ export interface OperationsApi {
     input: EnterpriseTransitionInput
   ): Promise<ApiResult<{ enterprise: Enterprise }>>;
 
+  /**
+   * Resend the first administrator's activation email. The administrator is
+   * whoever holds the organisation-wide super_admin role.
+   */
   reissueAdminInvite(
     input: ReissueAdminInviteInput
   ): Promise<ApiResult<{ enterprise: Enterprise }>>;
+
+  /**
+   * The enterprise's first administrator and their account state as the
+   * platform reports it now; null when none is listed. Never rejects.
+   */
+  getEnterpriseAdmin(enterpriseId: string): Promise<EnterpriseAdmin | null>;
 
   decideSiteRequest(input: SiteDecisionInput): Promise<ApiResult<undefined>>;
 

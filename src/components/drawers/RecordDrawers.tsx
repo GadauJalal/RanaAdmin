@@ -20,6 +20,7 @@ import {
   isSupportAnalyst,
   STAFF_CHECKLIST,
   type ChecklistItem,
+  type EnterpriseAdmin,
   type JobDetail,
   type NotificationItem,
   type NotificationList
@@ -55,7 +56,34 @@ export function EnterpriseDrawer({ id }: { id: string }) {
   const snapshot = useSnapshot();
   const { openOverlay } = useWorkspace();
   const enterprise = snapshot.enterprises.find(record => record.id === id);
+
+  /*
+   * The first administrator is whoever holds the organisation-wide super admin
+   * role, and their state (invited, active) lives on the organisation's own
+   * user list, so it is read when the drawer opens. Until it arrives, or when
+   * the platform does not report it, the record's own admin details stand in.
+   */
+  const [admin, setAdmin] = useState<EnterpriseAdmin | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setAdmin(null);
+    api
+      .getEnterpriseAdmin(id)
+      .then(loaded => {
+        if (!cancelled && loaded) setAdmin(loaded);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
   if (!enterprise) return <MissingRecord label="enterprise account" />;
+
+  const adminName = admin?.name || enterprise.adminName;
+  const adminEmail = admin?.email || enterprise.adminEmail;
+  const adminStatus = admin?.status ?? enterprise.adminStatus ?? null;
+  const adminInvited = adminStatus === "Invited";
 
   const requests = snapshot.siteRequests.filter(request => request.enterpriseId === id);
   const sites = snapshot.sites.filter(site => site.enterpriseId === id);
@@ -126,25 +154,26 @@ export function EnterpriseDrawer({ id }: { id: string }) {
             className="link-button"
             onClick={() => openOverlay({ kind: "reissue-admin", id: enterprise.id })}
           >
-            Reissue invite
+            Resend invitation
           </button>
         }
       >
         <FunctionRow
-          title={enterprise.adminName || "Not assigned"}
-          meta={enterprise.adminEmail || "No invitation issued"}
-          trailing={<Chip>{enterprise.adminName ? "Invited" : "Missing"}</Chip>}
+          title={adminName || "Not assigned"}
+          meta={
+            adminInvited
+              ? `${adminEmail ?? "Unknown address"} · Invited, activation email sent`
+              : adminEmail || "No administrator listed"
+          }
+          trailing={
+            <Chip>{adminStatus ?? (adminName ? "Invited" : "Missing")}</Chip>
+          }
         />
-        {enterprise.adminTempPassword ? (
-          <div className="temp-password" role="note">
-            <strong>One-time temporary password</strong>
-            <code>{enterprise.adminTempPassword}</code>
-            <small>
-              Give this to {enterprise.adminName || "the administrator"} for their first sign-in
-              (they set a real password on the Organization Admin activate screen). It is shown
-              only once and is not stored.
-            </small>
-          </div>
+        {adminInvited ? (
+          <Notice icon="info">
+            An activation email was sent to {adminEmail ?? "the administrator"}. They set their
+            own password from that link. Use Resend invitation if it did not arrive.
+          </Notice>
         ) : null}
       </DetailSection>
 

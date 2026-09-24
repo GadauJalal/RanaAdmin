@@ -32,7 +32,7 @@ export function NewEnterpriseModal() {
   return (
     <FormModal
       title="Create enterprise"
-      description="Create the tenant and issue its first organization administrator invitation."
+      description="Create the tenant and invite its first organization administrator by activation email, in one step."
       formId="enterprise-form"
       submitLabel="Create and invite"
       submitIcon="plus"
@@ -45,16 +45,15 @@ export function NewEnterpriseModal() {
               status: text(data, "status"),
               adminName: text(data, "adminName"),
               adminEmail: text(data, "adminEmail"),
+              email: text(data, "email"),
               products: data.getAll("product").map(String),
               phone: text(data, "phone")
             }),
           {
-            failureTitle: "Enterprise could not be created",
+            failureTitle: "Enterprise setup did not complete",
             success: ({ enterprise }) => ({
               title: "Enterprise created",
-              detail: enterprise.adminTempPassword
-                ? `${enterprise.name} is ready. The administrator's one-time temporary password is shown in the enterprise record; copy it now, it is not shown again.`
-                : `${enterprise.name} is ready for onboarding and the first administrator invitation was issued.`
+              detail: `${enterprise.name} is ready for onboarding. An activation email was sent to ${enterprise.adminEmail ?? "the first administrator"}; they set their own password from that link.`
             }),
             onSuccess: ({ enterprise }) => openOverlay({ kind: "enterprise", id: enterprise.id })
           }
@@ -96,7 +95,15 @@ export function NewEnterpriseModal() {
           type="email"
           placeholder="name@company.com"
         />
-        <small>The stored presentation is masked after invitation.</small>
+        <small>Their login address. The activation link is sent here.</small>
+      </div>
+      <div className="field">
+        <label htmlFor="enterprise-email">Organisation contact email</label>
+        <input id="enterprise-email" name="email" type="email" placeholder="ops@company.com" />
+        <small>
+          The organisation&apos;s own address, kept separately from the admin&apos;s. Leave blank
+          to use the admin email.
+        </small>
       </div>
       <div className="field">
         <label htmlFor="enterprise-phone">Contact phone</label>
@@ -187,17 +194,23 @@ export function ReissueAdminModal({ id }: { id: string }) {
 
   return (
     <ReasonModal
-      title="Reissue administrator invite"
-      description={`${enterprise.name} · ${enterprise.adminEmail ?? "No invitation issued"}`}
+      title="Resend administrator invitation"
+      description={`${enterprise.name} · ${enterprise.adminEmail ?? "No administrator listed"}`}
       formId="reissue-admin-form"
-      submitLabel="Reissue invite"
-      placeholder="Why a new invitation is required"
+      submitLabel="Resend invitation"
+      placeholder="Why a new activation email is required"
+      notice={
+        <Notice icon="info">
+          A fresh activation email goes to the organisation&apos;s administrator (whoever holds
+          the organisation-wide super admin role). They set their own password from that link.
+        </Notice>
+      }
       onSubmit={reason =>
         void run(() => api.reissueAdminInvite({ id, reason }), {
-          failureTitle: "Invitation could not be reissued",
+          failureTitle: "Invitation could not be resent",
           success: ({ enterprise: updated }) => ({
-            title: "Administrator invite reissued",
-            detail: `A fresh invitation was issued to ${updated.adminEmail ?? updated.adminName ?? "the initial administrator"}.`
+            title: "Administrator invitation resent",
+            detail: `A fresh activation email was sent to ${updated.adminEmail ?? updated.adminName ?? "the initial administrator"}.`
           })
         })
       }
@@ -849,7 +862,7 @@ export function NewInstallerModal() {
   return (
     <FormModal
       title="Add installer"
-      description="Create the installer's account and roster entry. They activate by email."
+      description="Create the installer's account and roster entry. They activate by email and can sign in straight away."
       formId="installer-form"
       submitLabel="Add installer"
       submitIcon="plus"
@@ -870,7 +883,7 @@ export function NewInstallerModal() {
             failureTitle: "Installer could not be added",
             success: ({ installer }) => ({
               title: "Installer added",
-              detail: `${installer.name} is on the roster and can be assigned to jobs once activated.`
+              detail: `${installer.name} is on the roster. Their activation email works immediately; the installer app shows an empty job list until a job is assigned.`
             }),
             onSuccess: ({ installer }) => openOverlay({ kind: "installer", id: installer.id })
           }
@@ -928,8 +941,9 @@ export function NewInstallerModal() {
       </div>
       <div className="field full">
         <Notice icon="shield">
-          Installers see only the jobs assigned to them. No site or organisation access is
-          granted at onboarding.
+          The activation email works immediately, before any job exists; the installer app
+          shows an empty job list until one is assigned. Installers see only the jobs assigned
+          to them. No site or organisation access is granted at onboarding.
         </Notice>
       </div>
     </FormModal>
