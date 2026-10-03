@@ -14,6 +14,7 @@
 
 import type {
   AccessReview,
+  AuditEvent,
   Device,
   Enterprise,
   EnterpriseAdminStatus,
@@ -316,6 +317,23 @@ export interface RevokeSupportGrantInput {
 
 export type ExportKind = "audit" | "devices";
 
+/**
+ * Which actors an audit read covers. `user` and `system` are the platform's
+ * own `actorType` filter values; `all` leaves the filter off.
+ */
+export type AuditActorType = "user" | "system" | "all";
+
+/** The actor filter as the Audit history offers it, in display order. */
+export const AUDIT_ACTOR_TYPES: { value: AuditActorType; label: string; detail: string }[] = [
+  { value: "user", label: "People", detail: "Actions taken by people, append only" },
+  { value: "system", label: "System", detail: "Ingestion, valuation and sign-in attempts, append only" },
+  { value: "all", label: "All actors", detail: "Every recorded action, append only" }
+];
+
+export interface AuditQuery {
+  actorType: AuditActorType;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Response payloads                                                           */
 /* -------------------------------------------------------------------------- */
@@ -343,6 +361,15 @@ export interface NotificationItem {
 export interface NotificationList {
   items: NotificationItem[];
   unreadCount: number;
+}
+
+/** One page of the audit log for an actor filter, with the platform's full count. */
+export interface AuditPage {
+  actorType: AuditActorType;
+  /** Newest first; at most one page. */
+  events: AuditEvent[];
+  /** How many entries match the filter in all. */
+  total: number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -451,6 +478,20 @@ export interface OperationsApi {
 
   /** Records that an operator exported data. The file itself is built client-side. */
   recordExport(kind: ExportKind): Promise<ApiResult<undefined>>;
+
+  /**
+   * The audit log for one actor filter, newest first. The snapshot already
+   * carries the people view; this reads the system or unfiltered view.
+   * Rejects when the log cannot be read.
+   */
+  listAudit(query: AuditQuery): Promise<AuditPage>;
+
+  /**
+   * End the operator's session. Against the backend the refresh token is
+   * revoked; whatever the platform answers, the local tokens are discarded,
+   * so this never rejects.
+   */
+  signOut(): Promise<void>;
 }
 
 export function failure(

@@ -77,16 +77,24 @@ export function clearSession(): void {
   write(ORG_KEY, undefined);
 }
 
+/** Query flag the login page reads to explain why the operator is back there. */
+export const SESSION_ENDED_PARAM = "reason";
+export const SESSION_ENDED_VALUE = "session-ended";
+
 /**
  * Send the user to the login screen after their session ends. Kept here so the
  * http client can call it without importing Next's router into non-component
  * code. A full navigation (not a client push) guarantees all in-memory state is
- * dropped along with the cleared tokens.
+ * dropped along with the cleared tokens. Concurrent 401s (the snapshot reads a
+ * dozen lists at once) trigger one navigation, not one per request.
  */
+let redirecting = false;
+
 export function redirectToLogin(): void {
-  if (typeof window === "undefined") return;
+  if (typeof window === "undefined" || redirecting) return;
   const { pathname, search } = window.location;
+  if (pathname === "/login") return;
+  redirecting = true;
   const from = encodeURIComponent(`${pathname}${search}`);
-  const target = `/login?from=${from}`;
-  if (window.location.pathname !== "/login") window.location.assign(target);
+  window.location.assign(`/login?from=${from}&${SESSION_ENDED_PARAM}=${SESSION_ENDED_VALUE}`);
 }

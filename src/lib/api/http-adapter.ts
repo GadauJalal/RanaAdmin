@@ -29,6 +29,7 @@ import { operationalTimestamp } from "@/lib/format";
 import type {
   AccessReview,
   AuditEvent,
+  AuditSource,
   Device,
   Enterprise,
   Incident,
@@ -48,6 +49,9 @@ import {
   staffRoleLabel,
   type AcceptInstallationInput,
   type ApiResult,
+  type AuditActorType,
+  type AuditPage,
+  type AuditQuery,
   type CreateEnterpriseInput,
   type CreateIncidentInput,
   type CreateInstallerInput,
@@ -223,7 +227,8 @@ interface BackendAuditEntry {
   entityType: string;
   entityId: string;
   outcome: "succeeded" | "failed" | string;
-  source: string;
+  /** Derived at read time; `system` is any actor without a users row (worker, ranaos-*, anonymous). */
+  source: "enterprise_admin" | "rana54_network_operations" | "system" | string;
   payload: Record<string, unknown> | null;
 }
 
@@ -340,17 +345,27 @@ async function fetchOnce(path: string, init: RequestInit): Promise<Response> {
   });
 }
 
+/**
+ * The session is over: the token expired and could not be rotated, the
+ * operator's grant was revoked, or their account was suspended. The platform
+ * answers all three with the same 401, so all three end the same way: tokens
+ * discarded, operator sent to sign in. Safe to call more than once.
+ */
+function endSession() {
+  clearSession();
+  redirectToLogin();
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<RequestOutcome<T>> {
   try {
     let response = await fetchOnce(path, init);
 
-    // An expired access token: rotate once and replay. Auth routes are exempt.
+    // A 401 mid-session: rotate the token pair once and replay. When the
+    // refresh is refused (expired, revoked grant, suspended account) there is
+    // no retry; the session ends. Auth routes are exempt from the rotation.
     if (response.status === 401 && !path.startsWith("/auth/")) {
       if (await refreshSession()) response = await fetchOnce(path, init);
-      if (response.status === 401) {
-        clearSession();
-        redirectToLogin();
-      }
+      if (response.status === 401) endSession();
     }
 
     const text = await response.text();
@@ -862,6 +877,12 @@ function mapDevice(device: BackendDevice, lookups: Lookups, jobs: BackendJob[]):
   };
 }
 
+const AUDIT_SOURCE: Record<string, AuditSource> = {
+  enterprise_admin: "Enterprise admin",
+  rana54_network_operations: "Rana54 Network Operations",
+  system: "System"
+};
+
 function mapAudit(entry: BackendAuditEntry): AuditEvent {
   const payload = entry.payload ?? {};
   const reason = typeof payload.reason === "string" ? payload.reason : "";
@@ -872,8 +893,32 @@ function mapAudit(entry: BackendAuditEntry): AuditEvent {
     action: capitalise(entry.eventType),
     entity: `${capitalise(entry.entityType)} ${entry.entityId}`,
     outcome: capitalise(entry.outcome),
-    reason
+    reason,
+    source: AUDIT_SOURCE[entry.source] ?? capitalise(entry.source || "system")
   };
+}
+
+/**
+ * GET /audit with the platform's `actorType` filter. `user` keeps human
+ * actions from being buried under ingestion rows; `all` sends no filter, which
+ * the platform treats as both kinds. Any other value would be refused (400),
+ * so only the two wire values are ever sent.
+ */
+function auditPath(actorType: AuditActorType): string {
+  const filter = actorType === "all" ? "" : `&actorType=${actorType}`;
+  return `/audit?limit=${PAGE}${filter}`;
+}
+
+/**
+ * The platform's full count from a list envelope ({ plural, total }). A bare
+ * array or an envelope without `total` counts the rows that came back.
+ */
+function listTotal(outcome: RequestOutcome<unknown>, rows: unknown[]): number {
+  if (outcome.ok && outcome.body && typeof outcome.body === "object") {
+    const total = (outcome.body as { total?: unknown }).total;
+    if (typeof total === "number" && Number.isFinite(total)) return Math.max(total, rows.length);
+  }
+  return rows.length;
 }
 
 const NOTIFICATION_TYPES: Record<string, string> = {
@@ -977,7 +1022,9 @@ async function buildSnapshot(): Promise<Snapshot> {
     request<unknown>(`/devices?limit=${PAGE}`),
     request<unknown>(`/jobs?limit=${PAGE}`),
     request<unknown>(`/site-requests?limit=${PAGE}`),
-    request<unknown>(`/audit?limit=${PAGE}`)
+    // People only: ingestion writes a row per reading and would bury every
+    // grant, invite and approval within minutes. System rows are read on request.
+    request<unknown>(auditPath("user"))
   ]);
 
   if (!me.ok && me.status === 401) {
@@ -1037,7 +1084,8 @@ async function buildSnapshot(): Promise<Snapshot> {
     supportGrants: grantRows.map(grant => mapSupportGrant(grant, allOrgs)),
     accessReviews: reviewRows.map(mapAccessReview),
     services: mapHealth(health.ok ? health.body : null),
-    audit: auditRows.map(mapAudit)
+    audit: auditRows.map(mapAudit),
+    auditTotal: listTotal(audit, auditRows)
   };
 }
 
@@ -1729,5 +1777,29 @@ export const httpAdapter: OperationsApi = {
 
   async recordExport(_kind: ExportKind) {
     return ok(undefined);
+  },
+
+  /** One page of GET /audit for the chosen actors, with the platform's full count. */
+  async listAudit({ actorType }: AuditQuery): Promise<AuditPage> {
+    const result = await request<unknown>(auditPath(actorType));
+    if (!result.ok) throw new Error(result.message);
+    const rows = asList<BackendAuditEntry>(result, "entries");
+    return { actorType, events: rows.map(mapAudit), total: listTotal(result, rows) };
+  },
+
+  /**
+   * POST /auth/logout revokes the refresh token; it runs behind the same live
+   * access check as every other route, so an operator whose grant was already
+   * revoked gets 401 here too. Either way the local tokens are discarded: a
+   * refresh token the platform did not revoke cannot get a grant-less or
+   * suspended account back in.
+   */
+  async signOut() {
+    const refreshToken = getRefreshToken();
+    try {
+      if (refreshToken) await post<void>("/auth/logout", { refreshToken });
+    } finally {
+      clearSession();
+    }
   }
 };

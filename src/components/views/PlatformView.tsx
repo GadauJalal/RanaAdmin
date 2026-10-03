@@ -1,17 +1,67 @@
 "use client";
 
+import { useEffect, useState } from "react";
+
 import { useTabParam } from "@/hooks/use-tab-param";
 import { Icon } from "@/components/ui/Icon";
-import { Chip, Metric, Notice, PageHeader, TableWrap, Tabs } from "@/components/ui/primitives";
-import { api, IS_PROTOTYPE_DATA } from "@/lib/api";
+import { Chip, EmptyState, Metric, Notice, PageHeader, TableWrap, Tabs } from "@/components/ui/primitives";
+import {
+  api,
+  AUDIT_ACTOR_TYPES,
+  IS_PROTOTYPE_DATA,
+  type AuditActorType,
+  type AuditPage
+} from "@/lib/api";
 import { downloadCsv } from "@/lib/format";
+import type { Snapshot } from "@/lib/types";
 import { useSnapshot, useWorkspace } from "@/providers/workspace-provider";
+
+/** The snapshot already holds the people view of the audit log. */
+function peoplePage(snapshot: Snapshot): AuditPage {
+  return { actorType: "user", events: snapshot.audit, total: snapshot.auditTotal };
+}
 
 /** Service health, safe checks, and the append-only operational history. */
 export function PlatformView() {
   const snapshot = useSnapshot();
   const { run, resetToSeed, pushToast } = useWorkspace();
   const [tab, setTab] = useTabParam("health");
+
+  /*
+   * Which actors the audit history shows. People is the default so grants,
+   * invites and approvals are never buried under ingestion rows; the System
+   * and All views are read from the platform when chosen, and re-read when
+   * the picture changes so they never fall behind the people view.
+   */
+  const [actorType, setActorType] = useState<AuditActorType>("user");
+  const [loadedPage, setLoadedPage] = useState<AuditPage | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  useEffect(() => {
+    if (actorType === "user") return;
+    let cancelled = false;
+    setAuditError(null);
+    api
+      .listAudit({ actorType })
+      .then(page => {
+        if (!cancelled) setLoadedPage(page);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setAuditError(error instanceof Error ? error.message : "The audit log could not be read.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [actorType, snapshot]);
+
+  const page: AuditPage | null =
+    actorType === "user"
+      ? peoplePage(snapshot)
+      : loadedPage?.actorType === actorType
+        ? loadedPage
+        : null;
+  const actorFilter = AUDIT_ACTOR_TYPES.find(item => item.value === actorType) ?? AUDIT_ACTOR_TYPES[0];
 
   const degraded = snapshot.services.filter(item => item.status !== "Operational").length;
   const activeGrants = snapshot.supportGrants.filter(item => item.status === "Active").length;
@@ -21,21 +71,26 @@ export function PlatformView() {
       failureTitle: "Export could not be recorded",
       success: () => ({
         title: "Audit export prepared",
-        detail: "The immutable event view was exported as CSV."
+        detail: `The ${actorFilter.label.toLowerCase()} view of the immutable event history was exported as CSV.`
       }),
       keepOverlay: true,
-      onSuccess: (_data, fresh) =>
+      onSuccess: (_data, fresh) => {
+        // The people view comes from the refreshed picture (it includes this
+        // export); the other views export exactly what is on screen.
+        const events = actorType === "user" ? fresh.audit : (page?.events ?? []);
         downloadCsv("rana54-control-center-audit.csv", [
-          ["Time", "Actor", "Action", "Entity", "Outcome", "Reason"],
-          ...fresh.audit.map(item => [
+          ["Time", "Actor", "Source", "Action", "Entity", "Outcome", "Reason"],
+          ...events.map(item => [
             item.time,
             item.actor,
+            item.source,
             item.action,
             item.entity,
             item.outcome,
             item.reason
           ])
-        ])
+        ]);
+      }
     });
   }
 
@@ -85,8 +140,8 @@ export function PlatformView() {
         />
         <Metric
           label="Audit events"
-          value={snapshot.audit.length}
-          detail="Append only operational history"
+          value={page ? page.total : "..."}
+          detail={actorFilter.detail}
         />
         <Metric
           label="Active support grants"
@@ -147,43 +202,71 @@ export function PlatformView() {
       ) : (
         <section className="panel">
           <div className="panel-toolbar">
-            <span className="eyebrow">Append only · {snapshot.audit.length} events</span>
+            <span className="eyebrow">
+              {page
+                ? `Append only · newest ${page.events.length} of ${page.total} events`
+                : "Append only · reading the platform log"}
+            </span>
             <span className="spacer" />
+            <div className="audit-actors" aria-label="Audit actors">
+              <Tabs
+                active={actorType}
+                onSelect={next => setActorType(next as AuditActorType)}
+                tabs={AUDIT_ACTOR_TYPES.map(item => ({ id: item.value, label: item.label }))}
+              />
+            </div>
             <button type="button" className="btn btn-small btn-secondary" onClick={exportAudit}>
               <Icon name="download" /> Export CSV
             </button>
           </div>
-          <TableWrap>
-            <table>
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Actor</th>
-                  <th>Action</th>
-                  <th>Entity</th>
-                  <th>Outcome</th>
-                  <th>Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {snapshot.audit.map(event => (
-                  <tr key={event.id}>
-                    <td>{event.time}</td>
-                    <td>{event.actor}</td>
-                    <td className="row-main">
-                      <strong>{event.action}</strong>
-                      <small>{event.id}</small>
-                    </td>
-                    <td className="row-id">{event.entity}</td>
-                    <td>
-                      <Chip>{event.outcome}</Chip>
-                    </td>
-                    <td>{event.reason}</td>
+          {auditError ? (
+            <Notice icon="alert" tone="warning">
+              {auditError}
+            </Notice>
+          ) : null}
+          {page && page.events.length === 0 ? (
+            <EmptyState
+              icon="info"
+              title={`No ${actorFilter.label.toLowerCase()} events recorded`}
+              description="The platform holds no audit entries for this actor filter."
+            />
+          ) : (
+            <TableWrap>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Actor</th>
+                    <th>Source</th>
+                    <th>Action</th>
+                    <th>Entity</th>
+                    <th>Outcome</th>
+                    <th>Reason</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </TableWrap>
+                </thead>
+                <tbody>
+                  {(page?.events ?? []).map(event => (
+                    <tr key={event.id}>
+                      <td>{event.time}</td>
+                      <td>{event.actor}</td>
+                      <td>
+                        <Chip>{event.source}</Chip>
+                      </td>
+                      <td className="row-main">
+                        <strong>{event.action}</strong>
+                        <small>{event.id}</small>
+                      </td>
+                      <td className="row-id">{event.entity}</td>
+                      <td>
+                        <Chip>{event.outcome}</Chip>
+                      </td>
+                      <td>{event.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TableWrap>
+          )}
         </section>
       )}
     </main>

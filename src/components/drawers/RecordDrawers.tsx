@@ -85,7 +85,14 @@ export function EnterpriseDrawer({ id }: { id: string }) {
   const adminStatus = admin?.status ?? enterprise.adminStatus ?? null;
   const adminInvited = adminStatus === "Invited";
 
+  // Only a request still awaiting a decision is open; decided ones are listed
+  // under their own outcome so an approved site is never read as pending work.
   const requests = snapshot.siteRequests.filter(request => request.enterpriseId === id);
+  const openRequests = requests.filter(request => request.status === "Pending review");
+  const decidedRequests = [
+    { title: "Approved site requests", status: "Approved" },
+    { title: "Returned site requests", status: "Returned" }
+  ];
   const sites = snapshot.sites.filter(site => site.enterpriseId === id);
   const incidents = snapshot.incidents.filter(
     incident => incident.enterprise === enterprise.name && incident.status !== "Resolved"
@@ -258,22 +265,48 @@ export function EnterpriseDrawer({ id }: { id: string }) {
       </DetailSection>
 
       <DetailSection title="Open site requests">
-        {requests.length ? (
+        {openRequests.length ? (
           <FunctionList>
-            {requests.map(request => (
+            {openRequests.map(request => (
               <FunctionRowButton
                 key={request.id}
                 title={request.siteName}
-                meta={`${request.id} · ${request.location}`}
+                meta={`${request.id} · ${request.location} · Submitted ${request.submitted}`}
                 trailing={<Chip>{request.status}</Chip>}
                 onClick={() => openOverlay({ kind: "site-request", id: request.id })}
               />
             ))}
           </FunctionList>
         ) : (
-          <EmptyState title="No site requests" />
+          <EmptyState
+            title="No open site requests"
+            description={
+              requests.length
+                ? "Every request from this enterprise has been decided."
+                : "This enterprise has not requested a site yet."
+            }
+          />
         )}
       </DetailSection>
+
+      {decidedRequests.map(group => {
+        const rows = requests.filter(request => request.status === group.status);
+        return rows.length ? (
+          <DetailSection key={group.status} title={group.title}>
+            <FunctionList>
+              {rows.map(request => (
+                <FunctionRowButton
+                  key={request.id}
+                  title={request.siteName}
+                  meta={`${request.id} · ${request.location} · Submitted ${request.submitted}`}
+                  trailing={<Chip>{request.status}</Chip>}
+                  onClick={() => openOverlay({ kind: "site-request", id: request.id })}
+                />
+              ))}
+            </FunctionList>
+          </DetailSection>
+        ) : null;
+      })}
 
       {incidents.length ? (
         <DetailSection title="Open incidents">

@@ -5,8 +5,6 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 
-import { clearSession, hasSession } from "@/lib/api/session";
-
 import { GlobalSearch } from "@/components/layout/GlobalSearch";
 import { OverlayHost } from "@/components/layout/OverlayHost";
 import { Icon } from "@/components/ui/Icon";
@@ -87,18 +85,32 @@ function Brand() {
 const UNREAD_POLL_MS = 60000;
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const { snapshot, loading, loadError, reload, overlay, openOverlay, navOpen, setNavOpen } =
-    useWorkspace();
+  const {
+    snapshot,
+    loading,
+    loadError,
+    reload,
+    session,
+    signOut,
+    overlay,
+    openOverlay,
+    navOpen,
+    setNavOpen
+  } = useWorkspace();
   const pathname = usePathname();
   const router = useRouter();
   const [unread, setUnread] = useState(0);
 
-  /* Live mode requires a signed-in operator; demo mode has no sign-in. */
+  /*
+   * Live mode requires a signed-in operator; demo mode has no sign-in. The
+   * session is resolved by the workspace provider once the browser is running,
+   * so nothing is fetched and nothing is decided until it is known.
+   */
   const live = !IS_PROTOTYPE_DATA;
-  const signedIn = !live || hasSession();
+  const signedIn = session === "signed-in";
   useEffect(() => {
-    if (!signedIn) router.replace("/login");
-  }, [signedIn, router]);
+    if (session === "signed-out") router.replace("/login");
+  }, [session, router]);
 
   /*
    * The bell badge: read on mount, once a minute, and whenever the inbox
@@ -125,10 +137,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, [ready, inboxOpen]);
 
-  function signOut() {
-    const base = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api").replace(/\/$/, "");
-    void fetch(`${base}/auth/logout`, { method: "POST" }).catch(() => undefined);
-    clearSession();
+  /* The platform revokes the refresh token; the local tokens go either way. */
+  async function handleSignOut() {
+    await signOut();
     router.replace("/login");
   }
 
@@ -198,7 +209,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           </nav>
           <div className="sidebar-spacer" />
           {live ? (
-            <button type="button" className="btn btn-secondary sign-out" onClick={signOut}>
+            <button
+              type="button"
+              className="btn btn-secondary sign-out"
+              onClick={() => void handleSignOut()}
+            >
               Sign out
             </button>
           ) : null}

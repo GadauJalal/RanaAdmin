@@ -552,6 +552,7 @@ export const SEED: Snapshot = {
       action: "Delivery test recorded",
       entity: "GW-R54-KAN-7721",
       outcome: "Passed",
+      source: "System",
       reason: "Commissioning evidence received"
     },
     {
@@ -561,6 +562,7 @@ export const SEED: Snapshot = {
       action: "Incident acknowledged",
       entity: "INC-P2-2041",
       outcome: "Recorded",
+      source: "Rana54 Network Operations",
       reason: "Device operations assigned"
     },
     {
@@ -570,6 +572,7 @@ export const SEED: Snapshot = {
       action: "Installation returned",
       entity: "JOB-2608-0398",
       outcome: "Blocked",
+      source: "Rana54 Network Operations",
       reason: "Duplicate gateway serial"
     },
     {
@@ -579,6 +582,7 @@ export const SEED: Snapshot = {
       action: "Support grant expired",
       entity: "GRANT-0411",
       outcome: "Access removed",
+      source: "System",
       reason: "Scheduled expiry"
     },
     {
@@ -588,7 +592,9 @@ export const SEED: Snapshot = {
       action: "Site request opened",
       entity: "REQ-SITE-1028",
       outcome: "Pending review",
+      source: "Rana54 Network Operations",
       reason: "New enterprise request"
     }
-  ]
+  ],
+  auditTotal: 5
 };

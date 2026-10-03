@@ -1,12 +1,14 @@
 # RanaAdmin (Network Operations) backend integration status
 
 _Assessed against the Rana54 staging API (`https://staging.api.rana54.com`,
-Swagger at `/api/docs`). Updated 2026-09-24 for organisation creation
-inviting its first administrator and for installers activating before their
-first job (the 2026-09-23 handover, sections 2 and 3); before that 2026-09-22
-for the staff roster and roles, support grants, access reviews and enterprise
-suspension, and 2026-09-16 for installer onboarding, device registration, the
-staff checklist, job unblock, site lifecycle and the notification inbox._
+Swagger at `/api/docs`). Updated 2026-10-03 for the audit correctness handover
+of 2026-09-28 (sections 3, 6 and the control app items of section 10); before
+that 2026-09-24 for organisation creation inviting its first administrator and
+for installers activating before their first job (the 2026-09-23 handover,
+sections 2 and 3), 2026-09-22 for the staff roster and roles, support grants,
+access reviews and enterprise suspension, and 2026-09-16 for installer
+onboarding, device registration, the staff checklist, job unblock, site
+lifecycle and the notification inbox._
 
 ## Summary
 
@@ -28,6 +30,55 @@ older backend empties that one collection instead of failing the console. If
 `GET /staff` answers 404 (a backend older than 2026-09-20) the roster falls
 back to `GET /admin/users` and staff writes fall back to the platform user
 routes (invite for Platform Operators only).
+
+### Audit log: actor filter, sources and the real total (2026-09-28 handover, section 3)
+- `GET /audit` takes `actorType=user|system`; any other value is refused with
+  400, so the live adapter only ever sends those two and sends no parameter for
+  the "All actors" view. The snapshot's audit read is
+  `GET /audit?limit=200&actorType=user`: ingestion writes a row per reading, so
+  without the filter grants, invites and approvals fell off the first page
+  within minutes.
+- `source` on an entry is `enterprise_admin`, `rana54_network_operations` or
+  (new) `system`, the last for any actor without a users row (`worker`,
+  `ranaos-*`, the `anonymous` failed-sign-in sentinel). The console labels them
+  "Enterprise admin", "Rana54 Network Operations" and "System" and shows the
+  label as a Source column on **Platform > Audit history** and in the CSV.
+- **Platform > Audit history** defaults to **People** and offers **System** and
+  **All actors**; the two extra views are read on demand through
+  `OperationsApi.listAudit({ actorType })` and re-read whenever the picture
+  changes. The **Audit events** tile and the panel toolbar show the list
+  envelope's `total` for the active view (newest 200 of N), not the page
+  length; `Snapshot.auditTotal` carries the people total.
+- Demo parity: seeded audit rows carry a `source`, the demo snapshot is the
+  people view, and the demo `listAudit` filters the same way. The stored demo
+  state key moved to `rana54-control-centre-v3-state` for the new shape.
+
+### Access changes take effect on the next request (section 6)
+- The platform now reads the user and their grants live on every request. A
+  revoked grant, a suspended account and an expired token all answer the same
+  `401 UNAUTHENTICATED`. The live adapter treats any 401 mid-session the same
+  way: one `POST /auth/refresh` (shared across concurrent 401s), one replay if
+  the rotation succeeded, otherwise the tokens are discarded and the operator
+  is sent to `/login?from=...&reason=session-ended` once, where the sign-in
+  screen explains that the session ended. A refused refresh is never retried.
+  `403 enterprise_suspended` is untouched and still maps to its own toast.
+- **Sign out** goes through `OperationsApi.signOut`: `POST /auth/logout
+  {refreshToken}` with the Bearer token (the previous call sent neither). If
+  logout itself answers 401 (grant already revoked), the tokens are discarded
+  locally all the same; the platform refuses that refresh token anyway.
+
+### Control app fixes from the audit (section 10)
+- **Audit events tile** shows the backend `total` (above).
+- **Open site requests** on the enterprise record lists only requests still
+  awaiting a decision; approved and returned ones sit under "Approved site
+  requests" and "Returned site requests".
+- **No data calls before sign-in.** The workspace provider resolves the
+  session from the stored tokens before anything is fetched, never loads on
+  `/login`, and loads once per session; sign-in triggers the first load. The
+  unread-count poll already waited for the loaded picture. A signed-out visit
+  to any route and the login page itself produce zero backend requests (the
+  audit saw 13 unauthenticated 401s there). Resolving the session after mount
+  also removes the hydration mismatch the shell used to log on full loads.
 
 ### Access: staff, support grants, access reviews
 - **Rana54 staff** are the four platform roles `admin` (shown as "Platform
@@ -123,7 +174,10 @@ routes (invite for Platform Operators only).
 
 ### Wired
 - **Enterprises, sites, site requests, jobs, devices, audit** via the list
-  endpoints above.
+  endpoints above (audit with `actorType=user`, plus `actorType=system` and the
+  unfiltered read on demand; `total` read from every audit envelope).
+- **Session end** on any 401 (refresh once, then sign out) and **sign out**
+  via `POST /auth/logout {refreshToken}`.
 - **Staff roster** via `GET /staff`, **staff invite** via `POST /staff`
   (four roles, mandatory reason, activation email), **suspend / restore** via
   `POST /staff/{id}/transitions`. `POST /admin/users` now accepts only

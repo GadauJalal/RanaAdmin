@@ -32,6 +32,8 @@ import {
   staffRoleLabel,
   type AcceptInstallationInput,
   type ApiResult,
+  type AuditPage,
+  type AuditQuery,
   type CreateEnterpriseInput,
   type CreateIncidentInput,
   type CreateInstallerInput,
@@ -61,7 +63,8 @@ import {
   type UnlinkGatewayInput
 } from "./contract";
 
-export const STORAGE_KEY = "rana54-control-centre-v2-state";
+/** Bumped whenever the stored snapshot shape changes; older state is discarded. */
+export const STORAGE_KEY = "rana54-control-centre-v3-state";
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -73,7 +76,20 @@ let memory: Snapshot | null = null;
 function isSnapshot(value: unknown): value is Snapshot {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
-  return SNAPSHOT_COLLECTIONS.every(key => Array.isArray(record[key]));
+  return (
+    SNAPSHOT_COLLECTIONS.every(key => Array.isArray(record[key])) &&
+    typeof record.auditTotal === "number"
+  );
+}
+
+/**
+ * The stored state keeps every audit row. What the workspace receives is the
+ * people view (`actorType=user` on the platform): system rows are left out and
+ * `auditTotal` counts the people rows, exactly as the live adapter reports it.
+ */
+function peopleView(snapshot: Snapshot): Snapshot {
+  const audit = snapshot.audit.filter(event => event.source !== "System");
+  return { ...snapshot, audit, auditTotal: audit.length };
 }
 
 function read(): Snapshot {
@@ -102,7 +118,7 @@ function commit(next: Snapshot): Snapshot {
       console.warn("Network Operations changes could not be persisted", error);
     }
   }
-  return clone(next);
+  return peopleView(clone(next));
 }
 
 function audit(
@@ -119,8 +135,10 @@ function audit(
     action,
     entity,
     outcome,
-    reason
+    reason,
+    source: "Rana54 Network Operations"
   });
+  snapshot.auditTotal = snapshot.audit.length;
 }
 
 /** Every mutation works on a copy so a rejected change never half-applies. */
@@ -175,7 +193,7 @@ function notificationsFrom(snapshot: Snapshot): NotificationItem[] {
 
 export const mockAdapter: OperationsApi = {
   async getSnapshot() {
-    return clone(read());
+    return peopleView(clone(read()));
   },
 
   async resetSnapshot() {
@@ -1033,5 +1051,18 @@ export const mockAdapter: OperationsApi = {
       );
     }
     return ok(snapshot, undefined);
+  },
+
+  /** The seeded log filtered the way the platform's actorType filter would. */
+  async listAudit({ actorType }: AuditQuery): Promise<AuditPage> {
+    const rows = read().audit.filter(event =>
+      actorType === "all" ? true : (event.source === "System") === (actorType === "system")
+    );
+    return { actorType, events: clone(rows), total: rows.length };
+  },
+
+  /** Demo mode has no sign-in, so there is nothing to revoke. */
+  async signOut() {
+    return undefined;
   }
 };

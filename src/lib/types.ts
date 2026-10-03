@@ -208,6 +208,13 @@ export interface PlatformService {
   detail: string;
 }
 
+/**
+ * Who wrote an audit entry, as the console labels it: a person in an
+ * enterprise, a person on the Rana54 side, or a non-human actor (ingestion,
+ * valuation, failed sign-in attempts).
+ */
+export type AuditSource = "Enterprise admin" | "Rana54 Network Operations" | "System";
+
 export interface AuditEvent {
   id: string;
   time: string;
@@ -216,6 +223,7 @@ export interface AuditEvent {
   entity: string;
   outcome: string;
   reason: string;
+  source: AuditSource | string;
 }
 
 export interface Operator {
@@ -242,7 +250,14 @@ export interface Snapshot {
   /** Privileged access reviews, newest first. */
   accessReviews: AccessReview[];
   services: PlatformService[];
+  /**
+   * The newest audit entries written by people (actorType=user), so human
+   * actions are never buried under ingestion events. System entries are read
+   * on request through `OperationsApi.listAudit`.
+   */
   audit: AuditEvent[];
+  /** How many people-written entries the platform holds in all, not just this page. */
+  auditTotal: number;
 }
 
 export const SNAPSHOT_COLLECTIONS = [

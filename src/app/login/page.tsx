@@ -4,8 +4,9 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 
 import { Icon } from "@/components/ui/Icon";
+import { Notice } from "@/components/ui/primitives";
 import { IS_PROTOTYPE_DATA } from "@/lib/api";
-import { hasSession, setTokens } from "@/lib/api/session";
+import { SESSION_ENDED_PARAM, SESSION_ENDED_VALUE } from "@/lib/api/session";
 import { BRAND_MARK_SVG } from "@/lib/brand";
 import { useWorkspace } from "@/providers/workspace-provider";
 
@@ -39,19 +40,28 @@ function AsideFlow() {
 
 /**
  * Operator sign-in against the real backend (live mode only). Demo mode has
- * no sign-in, so it sends the visitor straight to the workspace.
+ * no sign-in, so it sends the visitor straight to the workspace. No data is
+ * read from the platform while this screen is open; the first load follows a
+ * successful sign-in.
  */
 export default function LoginPage() {
   const router = useRouter();
-  const { reload } = useWorkspace();
+  const { session, signIn } = useWorkspace();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sessionEnded, setSessionEnded] = useState(false);
 
   useEffect(() => {
-    if (IS_PROTOTYPE_DATA || hasSession()) router.replace("/overview");
-  }, [router]);
+    if (IS_PROTOTYPE_DATA || session === "signed-in") router.replace("/overview");
+  }, [session, router]);
+
+  /* Sent here by a 401 mid-session: expired token, revoked grant or suspended account. */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setSessionEnded(params.get(SESSION_ENDED_PARAM) === SESSION_ENDED_VALUE);
+  }, []);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -74,8 +84,7 @@ export default function LoginPage() {
         return;
       }
       const pair = (await response.json()) as { accessToken: string; refreshToken: string };
-      setTokens(pair);
-      await reload();
+      await signIn(pair);
       router.replace("/overview");
     } catch {
       setError("The Rana54 backend could not be reached.");
@@ -140,6 +149,12 @@ export default function LoginPage() {
           </header>
 
           <form className="login-form" onSubmit={submit} noValidate>
+            {sessionEnded && !error ? (
+              <Notice icon="info">
+                Your session has ended. Sign in again to continue; if your access was changed,
+                the new access applies from this sign-in.
+              </Notice>
+            ) : null}
             {error ? (
               <p className="login-error" role="alert">
                 <Icon name="alert" /> {error}

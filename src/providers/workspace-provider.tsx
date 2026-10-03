@@ -1,5 +1,6 @@
 "use client";
 
+import { usePathname } from "next/navigation";
 import {
   createContext,
   useCallback,
@@ -11,7 +12,8 @@ import {
   type ReactNode
 } from "react";
 
-import { api, type ApiResult } from "@/lib/api";
+import { api, IS_PROTOTYPE_DATA, type ApiResult } from "@/lib/api";
+import { hasSession, setTokens, type TokenPair } from "@/lib/api/session";
 import type { Snapshot } from "@/lib/types";
 
 /* -------------------------------------------------------------------------- */
@@ -68,6 +70,19 @@ const DEFAULT_TOAST_DETAIL = "The change was recorded in the immutable audit his
 const TOAST_LIFETIME = 3600;
 
 /* -------------------------------------------------------------------------- */
+/* Session                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Whether an operator is signed in. Demo mode has no sign-in and is always
+ * "signed-in". Live mode starts "unknown" until the browser's stored tokens
+ * have been read (they are not available during server rendering), so the
+ * server and the first client render agree, and nothing is fetched until the
+ * answer is known.
+ */
+export type SessionState = "unknown" | "signed-out" | "signed-in";
+
+/* -------------------------------------------------------------------------- */
 /* Context                                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -89,6 +104,12 @@ interface WorkspaceValue {
   pending: boolean;
   reload: () => Promise<void>;
   resetToSeed: () => Promise<void>;
+
+  session: SessionState;
+  /** Store the token pair from sign-in and load the first operational picture. */
+  signIn: (tokens: TokenPair) => Promise<void>;
+  /** End the session on the platform and locally, and drop the loaded picture. */
+  signOut: () => Promise<void>;
 
   overlay: Overlay | null;
   openOverlay: (overlay: Overlay) => void;
@@ -115,11 +136,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [session, setSession] = useState<SessionState>(IS_PROTOTYPE_DATA ? "signed-in" : "unknown");
   const [overlay, setOverlay] = useState<Overlay | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [navOpen, setNavOpen] = useState(false);
   const [searchFocusSignal, setSearchFocusSignal] = useState(0);
   const toastSeq = useRef(0);
+  const pathname = usePathname();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -137,9 +160,42 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  /* Live mode: the stored tokens decide the session once the browser is running. */
   useEffect(() => {
+    if (!IS_PROTOTYPE_DATA) setSession(hasSession() ? "signed-in" : "signed-out");
+  }, []);
+
+  /*
+   * The first load waits for a session and never runs on the sign-in screen,
+   * so a visitor who is not signed in causes no backend traffic at all. One
+   * load per session: sign-in requests it directly, and the route change that
+   * follows must not request a second one.
+   */
+  const onLoginRoute = pathname === "/login";
+  const shouldLoad = session === "signed-in" && !onLoginRoute;
+  const loadRequested = useRef(false);
+  useEffect(() => {
+    if (!shouldLoad || loadRequested.current) return;
+    loadRequested.current = true;
     void load();
-  }, [load]);
+  }, [shouldLoad, load]);
+
+  const signIn = useCallback(
+    async (tokens: TokenPair) => {
+      setTokens(tokens);
+      setSession("signed-in");
+      loadRequested.current = true;
+      await load();
+    },
+    [load]
+  );
+
+  const signOut = useCallback(async () => {
+    loadRequested.current = false;
+    await api.signOut();
+    setSnapshot(null);
+    setSession("signed-out");
+  }, []);
 
   const resetToSeed = useCallback(async () => {
     setSnapshot(await api.resetSnapshot());
@@ -225,6 +281,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       pending,
       reload: load,
       resetToSeed,
+      session,
+      signIn,
+      signOut,
       overlay,
       openOverlay,
       closeOverlay,
@@ -244,6 +303,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       pending,
       load,
       resetToSeed,
+      session,
+      signIn,
+      signOut,
       overlay,
       openOverlay,
       closeOverlay,
